@@ -73,9 +73,10 @@ defmodule Conns.Pool do
   type interaction. Returns list of all connections found. Use `filter`
   as an indicator function.
   """
-  @spec lookup( source, int_type_s, (Conn.t -> boolean), id) :: [ {Conn.id, timeout, Conn.t}
+  @spec lookup( source, int_type_s, (Conn.t -> boolean), id) :: [ {Conn.id, timeout, Conn.t | {:needauth, Conn.t}}
                                                                 | {Conn.id, :invalid}
-                                                                | {Conn.id, :needauth}]
+                                                                | {Conn.id, :needauth, Conn.t}
+                                                                | {Conn.id, timeout, :needauth, Conn.t}]
   def lookup( source, int_type_s, filter \\ fn _ -> true end, pool_id \\ nil) do
     Server.name( pool_id)
     |> GenServer.call( {:lookup, {source, int_type_s, filter}})
