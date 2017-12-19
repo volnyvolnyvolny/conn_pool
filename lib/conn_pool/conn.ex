@@ -3,7 +3,7 @@ defmodule Conn.Defaults do
   Default implementations of optional callbacks of `Conn` protocol:
   `Conn.add_tag/2`, `Conn.delete_tag/2`, `Conn.tags/1`, `Conn.undo/3`,
   `Conn.set_auth/3`. All of them are overridable, and by default
-  return `{:error, :notsupported}` and `:notsupported`.
+  return `{:error, :notsupported}` or `:notsupported`.
 
   Use it like this:
 
@@ -113,7 +113,7 @@ defprotocol Conn do
   @type  not_list :: term
 
   @type  auth :: not_list
-  @type  tag :: not_list
+  @type  tag :: any
   @type  source :: atom | String.t
   @type  error :: any
   @type  data :: any
@@ -289,9 +289,8 @@ defprotocol Conn do
 
   @doc """
   Add tag to given connection so later it can be filtered
-  using `tags/1` and `filter_or_tag` argument given to
-  `Conns.Pool.lookup/4` and `Conns.Pool.*_first/4` functions.
-  **By tag means arbitrary term except list**.
+  using `tags/1` with `Conns.Pool.lookup/4` and
+  `Conns.Pool.*_first/4` functions.
 
   Use `Conns.Defaults` to define function `add_tag/2`, `delete_tag/2`
   and `tags/1` which returns `:notsupported` atoms as a constant.
@@ -301,7 +300,7 @@ defprotocol Conn do
 
 
   @doc """
-  Delete tag from given connection. *Tag can be any term except list*.
+  Delete tag from given connection.
 
   Use `Conns.Defaults` to define function `add_tag/2`, `delete_tag/2`
   and `tags/1` which returns `:notsupported` atoms as a constant.
@@ -311,9 +310,8 @@ defprotocol Conn do
 
 
   @doc """
-  All tags associated with given connection. *Tag can be any term except list!*
-  Tags can be added via `Conn.add_tag/2` function and deleted via
-  `Conn.delete_tag/2`.
+  All tags associated with given connection. Tags can be added via
+  `Conn.add_tag/2` function and deleted via `Conn.delete_tag/2`.
 
   Use `Conns.Defaults` to define functions `add_tag/2`, `delete_tag/2`
   and `tags/1`, which returns `:notsupported` atoms as a constant.
