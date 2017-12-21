@@ -45,13 +45,13 @@ defmodule Conns.Pool do
         Enum.all? [:tag1, :tag2], & &1 in Conn.tags( conn)
       end)
 
-  this selects connections to a given source that are capable
+  this selects given source connections that are capable
   to interact via both `:say` and `:listen` methods and satisfy given
   condition (has both `:tag1` and `:tag2` tags).
 
   As the first argument of `lookup/4` you can provide `:_` atom. That
-  literally means "connections to any source". So, full list of
-  connections can be taken by using formula:
+  literally means "connections to any source". So, the full list of
+  connections can be retrived by formula:
 
       Conns.Pool.lookup(:_, [])
       # which is the same as:
@@ -59,8 +59,7 @@ defmodule Conns.Pool do
 
   It's *highly advised* to use instead of `lookup/4` combined
   functions `take_first/4` and `fetch_first/4` as they returns
-  only connections with zero timeout that are valid
-  for specified methods.
+  only connections with zero timeout that are valid for specified methods.
 
   ## 2. request or take connection from pool
 
@@ -94,7 +93,7 @@ defmodule Conns.Pool do
 
   using combined functions is a preferred way.
 
-  ## 3. make `Conn.call/3`
+  ## 3. connection using
 
   Connection can be easilly `Conn.call/3`'ed:
 
@@ -113,7 +112,7 @@ defmodule Conns.Pool do
   This way it could be still `grab/2`'ed, but it would become
   untouchable by other functions.
 
-  Connection changes can be integrated back to pool using
+  Connection that was changed can be integrated back to pool using
   `update/2` functions.
 
   ## Usage
@@ -143,15 +142,15 @@ defmodule Conns.Pool do
   Be aware, that every function in `Pool` supports `POOL_ID` as the
   last argument. This way different pools can be used:
 
-      Conns.Pool.put( conn, 0) #add conn to pool #1
-      Conns.Pool.put( conn, 1) #add conn to pool #2
+      Conns.Pool.put( conn, {:pool, 0}) #add conn to pool #1
+      Conns.Pool.put( conn, {:pool, 1}) #add conn to pool #2
 
   ## Transactions
 
   Sagas-transactions would be added in next version of library.
   """
 
-  @type  id :: atom | String.t | non_neg_integer
+  @type  id :: {:pool, nil | atom | String.t | non_neg_integer}
   @type  source :: any
   @type  auth_idx :: non_neg_integer
   @type  method_s :: Conn.method | [Conn.method] | :_
@@ -162,45 +161,116 @@ defmodule Conns.Pool do
 
   @doc """
   Start connections pool. If variable `POOL_NAME` configured,
-  pool process starts with given name. Otherwise default
-  name used — `:"Conns.Pool"`. If `pool_id` argument is given — it
-  starts as `POOL_NAME.POOL_ID` or `:Conns.Pool.POOL_ID`.
+  pool process starts locally with the name given. Otherwise
+  default name used — `:"Conns.Pool"`. If `pool_id` argument
+  is given — it starts as `POOL_NAME.POOL_ID` or `:Conns.Pool.POOL_ID`.
   """
-  def start_link( pool_id \\ nil) do
-    __MODULE__.Server.start_link( pool_id)
+  @spec start_link( id | {id, [source]}) :: GenServer.on_start
+  def start_link( id_and_sources \\ {{:pool, nil}, []}) do
+    __MODULE__.Server.start_link( id_and_sources)
   end
 
 
   @doc """
-  Gets connection copy from pool. It's still available
-  for `getting` or `taking` by other consumers.
+  Fetch copy of pool's connection but leave conn to be
+  available for fetching or `take/2`'ing by other consumers.
+  Fetching enables to use connection parallely and as so
+  should be treated carefully. If you sure to use, take a look at
+  `state_of/2` pool's version of connection.
 
-  If happend, timeout returned in microseconds.
+  If happend, timeout returned in *microseconds* (=10^-6 s).
+  So, `{:error, {:timeout, μs}}`, means that you should wait
+  `μs` μs before connection can be retrived from pool.
+
+  If connection has `Conn.state/2` == `:invalid` for one of the
+  `Conn.methods/1`, connection with warning will be returned
+  in form of `{:ok, conn, [local timeout | :invalid, if it's
+  returned by Conn.state/2 method]}`.
+
+  Function will return ` {:error, :invalid}` for connection that
+  is `Conn.invalid?/1` and `{:error, :notfound}`, if pool does
+  not manage connection with such id.
   """
-  @spec get( Conn.id, id) :: {:ok, Conn.t} | {:error, :notfound | {:timeout, timeout}}
-  def get( id, pool_id \\ nil) do
+  @spec fetch( Conn.id, id) :: {:ok, Conn.t, []}
+                             | {:ok, Conn.t, [{Conn.method, timeout | :invalid}]}
+                             | {:error, :notfound
+                                      | :invalid
+                                      | {:timeout, timeout}}
+  def fetch( id, pool_id \\ {:pool, nil}) do
     Server.name( pool_id)
-    |> GenServer.call( {:get, id})
+    |> GenServer.call( {:fetch, id})
   end
 
 
   @doc """
-  Takes connection from pool. You can always give it back
-  to pool with `put` or `put_with_timeout`.
+  Fetching copies of pool's connections is a way to use them
+  in parallel. So this function help's us, giving an access
+  to `state_of/2` pool's version of connection.
 
-  If happend, timeout returned in microseconds.
+  If pool is managing connection with such id, `{:ok, states
+  for all Conn.methods/1}` returned. State can be: :notsupported,
+  :invalid, :ready, {:timeout, timeout}. Else, `{:error, :notfound}`
+  returned.
   """
-  @spec take( Conn.id, id) :: {:ok, Conn.t} | {:error, :notfound | {:timeout, timeout}}
-  def take( id, pool_id \\ nil) do
+  @spec state_of( Conn.id, id) :: {:ok, [{Conn.method, :notsupported
+                                                     | :invalid
+                                                     | :ready
+                                                     | {:timeout, timeout}}]}
+                                | {:error, :notfound}
+  def state_of( id, pool_id \\ {:pool, nil}) do
+    Server.name( pool_id)
+    |> GenServer.call( {:state_of, id})
+  end
+
+
+  @doc """
+  Take connection from pool. You can always give it back
+  to pool with `put/3` or `put_with_timeout/4`.
+
+  If happend, timeout returned in *microseconds* (=10^-6 s).
+  So, `{:error, {:timeout, μs}}`, means that you should wait
+  `μs` μs before connection can be retrived from pool.
+
+  If connection has `Conn.state/2` == `:invalid` for one of the
+  `Conn.methods/1`, connection with warning will be returned
+  in form of `{:ok, conn, [local timeout | :invalid, if it's
+  returned by Conn.state/2 method]}`.
+
+  Function will return ` {:error, :invalid}` for connection that
+  is `Conn.invalid?/1` and `{:error, :notfound}`, if pool does
+  not manage connection with such id.
+  """
+  @spec take( Conn.id, id) :: {:ok, Conn.t, []}
+                            | {:ok, Conn.t, [{Conn.method, timeout | :invalid}]}
+                            | {:error, :notfound
+                                     | :invalid
+                                     | {:timeout, timeout}}
+  def take( id, pool_id \\ {:pool, nil}) do
     Server.name( pool_id)
     |> GenServer.call( {:take, id})
   end
 
+
   @doc """
-  Put connection to pool.
+  Put connection to pool. This way (1) pool is initialized and
+  (2) conn can be given back after `take/2`'en.
+
+  Pool respects order in which connections has been putted.
+  So if any of `*_first` functions called, conns that are
+  injected earlier has priority on return.
+
+  As second argument spec can be given, that defines strategy
+  to use in case of connection `Conn.invalid?/1`'ates or if
+  connection is not `Conn.healthy?/1`. Call to `Conn.fix/2`
+  connection can be applied.
   """
   @spec put( Conn.t, id) :: Conn.id
-  def put( conn, pool_id \\ nil) do
+  def put( conn, pool_id \\ {:pool, nil}) do
+    Server.name( pool_id)
+    |> GenServer.call( {:put, conn})
+  end
+
+  def put( conn, spec, pool_id \\ {:pool, nil}) do
     Server.name( pool_id)
     |> GenServer.call( {:put, conn})
   end
@@ -227,7 +297,7 @@ defmodule Conns.Pool do
   as zero, or `:invalid`).
   """
   @spec lookup( source, method_s, (Conn.t -> boolean), id) :: [ {Conn.id, timeout, Conn.t}
-                                                                | {Conn.id, :invalid}]
+                                                              | {Conn.id, :invalid}]
   def lookup( source, method_s, filter \\ fn _ -> true end, pool_id \\ nil) do
     Server.name( pool_id)
     |> GenServer.call( {:lookup, {source, method_s, filter}})
@@ -239,7 +309,7 @@ defmodule Conns.Pool do
   Returns list of connections.
   """
   @spec lookup_all_sources( method_s, (Conn.t -> boolean), id) :: [ {Conn.id, timeout, Conn.t}
-                                                                    | {Conn.id, :invalid}]
+                                                                  | {Conn.id, :invalid}]
   def lookup_all_sources( method_s, filter \\ fn _ -> true end, pool_id \\ nil) do
     lookup(:_, method_s, filter, pool_id)
   end
@@ -271,7 +341,7 @@ defmodule Conns.Pool do
     Server.name( pool_id)
     |> GenServer.cast( {:set_timeout, {id, timeout}})
 
-    pool_id
+    id
   end
 
   @doc """
@@ -293,7 +363,8 @@ defmodule Conns.Pool do
   Lookup for connections to given source, that are capable of given
   type interaction. Takes the first connection if it's possible.
   """
-  @spec take_first( source, method_s, (Conn.t -> boolean), id) :: {:ok, Conn.t} | {:error, :notfound}
+  @spec take_first( source, method_s, (Conn.t -> boolean), id) :: {:ok, Conn.t}
+                                                                | {:error, :notfound | {:timeout, }}
   def take_first( source, method_s, filter \\ fn _ -> true end, pool_id \\ nil) do
     Server.name( pool_id)
     |> GenServer.call( {:take_first, {source, method_s, filter}})
@@ -305,86 +376,87 @@ defmodule Conns.Pool do
   type interaction. Returns back copy of the first connection that is satisfing
   if it's possible.
   """
-  @spec fetch_first( source, method_s, (Conn.t -> boolean), id) :: {:ok, {Conn.id, Conn.t}} | {:error, :notfound}
+  @spec fetch_first( source, method_s, (Conn.t -> boolean), id) :: {:ok, {Conn.id, Conn.t}}
+                                                                 | {:error, :notfound}
   def fetch_first( source, method_s, filter \\ fn _ -> true end, pool_id \\ nil) do
     Server.name( pool_id)
     |> GenServer.call( {:fetch_first, {source, method_s, filter}})
   end
 
 
-  @doc """
-  Makes `Conn.call/3` to connection with given id.
+  # @doc """
+  # Makes `Conn.call/3` to connection with given id.
 
-  If happend, timeout encoded in microseconds.
+  # If happend, timeout encoded in microseconds.
 
-  ## Examples
+  # ## Examples
 
-      iex> source = %JSON_API{url: "http://example.com/api/v1"}
-      iex> {:ok, {id, _conn}} = Pool.fetch_first( source, [:say, :listen])
-      iex> :ok = Pool.call( id, :say, what: "Hi!")
-  """
-  @spec call( Conn.id, Conn.method, id, keyword) :: :ok
-                                                   | {:ok, any}
-                                                   | {:error, any | {:timeout, timeout}}
-  def call( id, method, pool_id, specs \\ []) do
-    Server.name( pool_id)
-    |> GenServer.call( {:call, {id, method, specs}})
-  end
-
-
-  @doc """
-  Makes `Conn.call/3` to the first connection for specific source
-  type of interactions.
-
-  ## Examples
-
-      iex> source = %JSON_API{url: "http://example.com/api/v1"}
-      iex> :ok = Pool.call_first( source, :say, what: "Hi!")
-  """
-  @spec call_first( source | :_, Conn.method, id, keyword) :: :ok
-                                                             | {:ok, any}
-                                                             | {:error, any | {:timeout, timeout}}
-  def call_first( source, method, pool_id, specs \\ []) do
-    Server.name( pool_id)
-    |> GenServer.call( {:call_first, {source, method, specs}})
-  end
+  #     iex> source = %JSON_API{url: "http://example.com/api/v1"}
+  #     iex> {:ok, {id, _conn}} = Pool.fetch_first( source, [:say, :listen])
+  #     iex> :ok = Pool.call( id, :say, what: "Hi!")
+  # """
+  # @spec call( Conn.id, Conn.method, id, keyword) :: :ok
+  #                                                  | {:ok, any}
+  #                                                  | {:error, any | {:timeout, timeout}}
+  # def call( id, method, pool_id, specs \\ []) do
+  #   Server.name( pool_id)
+  #   |> GenServer.call( {:call, {id, method, specs}})
+  # end
 
 
+  # @doc """
+  # Makes `Conn.call/3` to the first connection for specific source
+  # type of interactions.
 
-  @doc """
-  Asynchronious `Conn.call/3` to connection with given id. Always
-  returns :ok.
+  # ## Examples
 
-  ## Examples
-
-      iex> source = %JSON_API{url: "http://example.com/api/v1"}
-      iex> {:ok, {id, _conn}} = Pool.fetch_first( source, [:say, :listen])
-      iex> ^id = Pool.cast( id, :say, what: "Hi!")
-  """
-  @spec cast( Conn.id, Conn.method, id, keyword) :: Conn.id
-  def cast( id, method, pool_id, specs \\ []) do
-    Server.name( pool_id)
-    |> GenServer.cast( {:cast, {id, method, specs}})
-
-    id
-  end
+  #     iex> source = %JSON_API{url: "http://example.com/api/v1"}
+  #     iex> :ok = Pool.call_first( source, :say, what: "Hi!")
+  # """
+  # @spec call_first( source | :_, Conn.method, id, keyword) :: :ok
+  #                                                            | {:ok, any}
+  #                                                            | {:error, any | {:timeout, timeout}}
+  # def call_first( source, method, pool_id, specs \\ []) do
+  #   Server.name( pool_id)
+  #   |> GenServer.call( {:call_first, {source, method, specs}})
+  # end
 
 
-  @doc """
-  Asynchronious `Conn.call/3` to the first given source connection for
-  specific type of interactions. Always returns :ok.
 
-  ## Examples
+  # @doc """
+  # Asynchronious `Conn.call/3` to connection with given id. Always
+  # returns :ok.
 
-      iex> source = %JSON_API{url: "http://example.com/api/v1"}
-      iex> :ok = Pool.cast_first( source, :say, what: "Hi!")
-  """
-  @spec cast_first( source | :_, Conn.method, id, keyword) :: {:ok, {Conn.id, Conn.t}}
-                                                              | {:error, :notfound}
-  def cast_first( source, method, pool_id, specs \\ []) do
-    with {:ok, {id,_}}=ret <- fetch_first( source, method, pool_id) do
-      cast( id, method, pool_id, specs)
-      ret
-    end
-  end
+  # ## Examples
+
+  #     iex> source = %JSON_API{url: "http://example.com/api/v1"}
+  #     iex> {:ok, {id, _conn}} = Pool.fetch_first( source, [:say, :listen])
+  #     iex> ^id = Pool.cast( id, :say, what: "Hi!")
+  # """
+  # @spec cast( Conn.id, Conn.method, id, keyword) :: Conn.id
+  # def cast( id, method, pool_id, specs \\ []) do
+  #   Server.name( pool_id)
+  #   |> GenServer.cast( {:cast, {id, method, specs}})
+
+  #   id
+  # end
+
+
+  # @doc """
+  # Asynchronious `Conn.call/3` to the first given source connection for
+  # specific type of interactions. Always returns :ok.
+
+  # ## Examples
+
+  #     iex> source = %JSON_API{url: "http://example.com/api/v1"}
+  #     iex> :ok = Pool.cast_first( source, :say, what: "Hi!")
+  # """
+  # @spec cast_first( source | :_, Conn.method, id, keyword) :: {:ok, {Conn.id, Conn.t}}
+  #                                                             | {:error, :notfound}
+  # def cast_first( source, method, pool_id, specs \\ []) do
+  #   with {:ok, {id,_}}=ret <- fetch_first( source, method, pool_id) do
+  #     cast( id, method, pool_id, specs)
+  #     ret
+  #   end
+  # end
 end

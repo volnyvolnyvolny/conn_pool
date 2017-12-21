@@ -10,28 +10,49 @@ defmodule Conns.Pool.Server do
 
 # #   import Enum, only: [map: 2]
 
-#   @name System.get_env("POOL_NAME") || :"Conns.Pool"
+  @name System.get_env("POOL_NAME") || :"Conns.Pool"
 
 
-#   @doc """
-#   GenServer name for given id.
-#   """
-#   def name( pool_id) do
-#    :"#{@name}#{if pool_id do "."<>to_string( pool_id) end}"
-#   end
+  @doc """
+  GenServer name for given pool id. Supports `{:global, term}`
+  and `{:via, module, term}`. You have no need to call this
+  function, just pass pool id as the last argument of pool
+  functions.
+  """
+  def name( {:pool, id}), do: name( id)
+
+  def name( pool_id) do
+    case @name do
+      {:global, term} -> {:global, {term, pool_id}}
+      {:via, module, term} -> {:via, module, {term, pool_id}}
+      atom -> :"#{atom}#{if pool_id do "."<>to_string( pool_id) end}"
+    end
+  end
 
 
-#   @doc "Initialize ETS table."
-#   def init(_pool_id) do
-#     :rand.seed(:exsp)
+  @doc """
+  Initialize server.
 
-#     {:ok, {:ets.new(:_, [:ordered_set, :private]), []}}
-#   end
+  If sources list provided, `Conns.init` call made for every
+  source and returned connections are added to pool as they are.
+  """
+  def init( {pool_id, sources}) do
+    :rand.seed(:exsp)
 
-#   @doc "Start pool server."
-#   def start_link( pool_id \\ nil) do
-#     GenServer.start_link(__MODULE__, pool_id, name: name( pool_id))
-#   end
+    table = :ets.new(:_, [:ordered_set, :private])
+
+    Enum.flat_map( sources, &Conns.init/1)
+    |> Enum.each(& handle_call( {:put, &1}, self(), table))
+
+    {:ok, table}
+  end
+
+  @doc """
+  Starts corresponding GenServer. Use `Conns.Pool.start_link/1` instead.
+  """
+  def start_link( {{:pool, id},_sources}=init_args) do
+    GenServer.start_link(__MODULE__, init_args, name: name( {:pool, id}))
+  end
 
 
 
@@ -43,53 +64,6 @@ defmodule Conns.Pool.Server do
 # #   end
 
 
-
-
-# #  @doc "Add auth to ETS."
-# #   def add_auth!( {table, auths}=state, auth, source_id) do
-# #     require Kernel
-
-# #     unless find_index( auths, auth) do
-
-# #       {auths, idx} = if idx = find_index( auths, &Kernel.!/1) do
-# #                        {List.replace_at( auths, idx, nil), idx}
-# #                      else
-# #                        {auths++[auth], length( auths)}
-# #                      end
-
-# #       lookup( table, fn {{conn_source_id,_,conn}, _, _} ->
-# #                         conn_source_id == source_id,
-# #                      && Conn.auth( conn) != :is_not_supported
-# #       end)
-# #       |> Enum.map( fn tuple ->
-# #            conn = Conn.init( struct( name( tuple)),
-# #                              %{source_id: source_id})
-
-# #            {{source_id, idx, :_}, :noerrors, conn}
-# #          end)
-# #       |> Enum.concat( get_conns( table, source_id))
-# #       |> replace_conns( table, source_id)
-
-# #       {table, auths}
-# #     else
-# #       raise "Cannot add auth that is already in list!"
-# #     end
-# #   end
-
-
-# #  @doc "Delete auth from ETS."
-# #   def delete_auth!( {table, auths}=state, auth) do
-
-# #     if idx = find_index auths, auth do
-# #       delete( table, fn {{_,auth_idx,_}, _, _} ->
-# #         auth_idx == idx
-# #       end)
-
-# #       {table, List.replace_at( auths, idx, nil)}
-# #     else
-# #       raise "Cannot delete auth that is not there!"
-# #     end
-# #   end
 
 # #   # Find first tuple with conn ready for use and
 # #   # all the conditions are stand.
