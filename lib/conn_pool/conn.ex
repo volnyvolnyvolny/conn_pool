@@ -72,6 +72,9 @@ defmodule Conn.Defaults do
 
       def tags(_conn), do: :notsupported
 
+      def init( conn,_args), do: {:ok, conn}
+
+      def close(_conn), do: {:error, :notsupported}
 
       def undo(_conn,_method,_specs), do: {:error, :notsupported}
 
@@ -89,21 +92,88 @@ defprotocol Conn do
 
   # Callbacks
 
-    * `init/2` — initialize connection;
     * `call/3` — interact using given connection and specs;
-    * `source/1` — get connection source;
+    * `sources/1` — get connection sources. *Commonly, it's a list
+    with a lonely single element*, but you can make connections that are
+    handling more than one source;
     * `methods/1` — methods supported by connection;
     * `state/2` — state of connection in respect of method
-      (`:ready` for interaction, `:notsupported` method, `:invalid`, timeout);
+      (`:ready` for interaction, `:invalid` and needs to be fixed,
+      have local timeout and was `:closed`);
 
   ## Optional callbacks
 
+    * `init/2` — initialize connection;
+    * `fix/2` — try to fix connection that returns `state/2` == `:invalid`
+       for specific method;
     * `tags/1` — tags associated with connection;
     * `add_tag/2` — associate tag with connection;
     * `delete_tag/2` — deassociate tag from connection;
     * `set_auth/3` — authenticate connection;
 
     * `undo/3` — support for Sagas-transaction mechanism.
+
+  ## Child spec
+
+  By analogy with `Supervisor` module, `Conns.Pool` treats connections as a
+  childs. By default, `Conns.Pool` will:
+
+  1. delete conn if it's came to final, `:closed` state;
+  2. try to `fix/2` connection if it's became `invalid?/1`;
+  3. try to `fix/3` connection if it's `state/2` == `:invalid` for
+  some of the `methods/1`;
+  4. recreate connection with given args if it failed to make steps 2 or 3.
+
+  This behaviour is easy to tune. All you need is to provide specs with
+  different triggers and actions. `Conns.Pool` has a builtin trigger&actions
+  system. For example, default behaviour is encoded as:
+
+      [__any__: [became(:invalid, do: :fix),
+                 unable(:fix, do: :recreate),
+                 became(:closed, do: :delete)],
+       __all__:  became(:invalid, do: :fix)]
+
+  The tuple element of the keyword has key `:__any__` (or `:_`) that means
+  "any of the connection `methods/1`". As a value, list of triggers&actions
+  were given. In this context, `became(:invalid, do: :fix)` means "if `state/2`
+  became equal to `:invalid`, do `fix/3` — `Conn.fix( conn, method, init_args)`".
+
+  Sometimes `fix/2` returns `{:error, _}` tuple, means we failed to fix
+  connection. That's where `unable` macros became handy. In `:_` context,
+  `unable(:fix, do: :recreate)` means "if `fix/3` failed, change connection
+  with a fresh copy".
+
+  In the `:__all__` context, `became(:invalid, do: fix)` means "if connection
+  is `invalid?/1`, do `fix/2`".
+
+  Contexts:
+
+  * `:_` | `__any__` — trigger activated for any of the `methods/1`;
+  * `__all__` — corresponds to situation when all the defined triggers are
+  fired, for example `__all__: [became(:timeout, do: [{:log, "Timeout!"}, :panic]), became(:invalid, do: :fix)]` means that if *all* the `methods/1` of connection
+  have timeout, pool will log the "Timeout!" message and after that
+  execute `:panic` action. Second trigger would be used if conn became
+  `invalid?/1`. This case `fix/2` would be called.
+
+  Available actions:
+
+  * `{:log, message}` — add log message;
+  * `:delete` — delete connection from pool;
+  * `:fix` — in `__all__` context call `fix/2` function, in all the other ones
+  call `fix/3`;
+  * `:recreate` — change connection with the a fresh version returned by
+  `init/2`.
+  * `({pool_id, conn_id, conn} -> [action])` — of course, in the `do block`
+  arbitrary function can be given;
+  * `[action]` — list of actions to make, for ex.: [:fix, :1]
+
+  Triggers:
+
+  * `became( new_state, do: action|actions)` — if given
+  * `became( new_state, mark: atom, do block)` — if given
+  * `tagged( new_tag, do block)`;
+  * `untagged( deleted_tag, do block)`;
+  * `unable( mark, do block)`.
   """
 
   @type  t :: any
@@ -118,6 +188,11 @@ defprotocol Conn do
   @type  error :: any
   @type  data :: any
 
+  @type  state :: :ready | :invalid | :closed | :timeout
+  @type  action :: :fix | :panic | :poolrestart | (Conn.t -> :ok) | :close | :reinit
+  @type  spec :: [{method | :_, {:onbecame, state, action}
+                              | {:onerror, action}}]
+
 
   @doc """
   Init connection. Options can be provided.
@@ -125,8 +200,18 @@ defprotocol Conn do
   As init argument, connection pool provide at
   least `{:source, source}` tuple.
   """
-  @spec init( Conn.t, keyword) :: Conn.t
-  def init(_conn, opts \\ [])
+  @spec init( Conn.t, keyword) :: {:ok, Conn.t} | {:error, error}
+  def init(_conn, args \\ [])
+
+
+  @doc """
+  Fix connection. Options can be provided.
+
+  As init argument, connection pool provide at
+  least `{:source, source}` tuple.
+  """
+  @spec fix( Conn.t, method) :: {:ok, Conn.t} | {:error, Conn.t}
+  def fix( conn, method)
 
 
   @doc """
@@ -188,7 +273,10 @@ defprotocol Conn do
 
 
   @doc """
-  Source of given connection.
+  Given connection sources.
+
+  Commonly, it’s a list with a lonely single element, `[single source]`,
+  but you can make connections that are handling more than one source.
 
   ## Examples
 
@@ -197,8 +285,8 @@ defprotocol Conn do
       iex> Conn.source( conn).url
       "http://example.com/api/v1"
   """
-  @spec source( Conn.t) :: source
-  def source( conn)
+  @spec sources( Conn.t) :: [source]
+  def sources( conn)
 
 
   @doc """
@@ -257,16 +345,21 @@ defprotocol Conn do
 
 
   @doc """
-  Connection state for given type of interacting.
+  Connection state for given method of interaction.
+
+  If method argument is not in the `methods/1` list then it's common to
+  raise an runtime error.
 
   ## Return atoms:
 
-    * `:notsupported`            — method is not in the `methods/1` list;
     * `:ready` | `{:timeout, 0}` — ready for given method interaction;
-    * `:invalid`                 — connection is broken for this method
-                                   of interaction, need to recreate it;
-    * `{:timeout, not spended}`  — timeout happend, return how long is it left
-                                   to wait in microseconds.
+    * `:invalid` — connection is broken for this method of interaction.
+    You can try to `fix/2` it manually or set up pool trigger that will
+    do that automagically — see `Conns.Pool.put/2` and [Spec section](#module-child-spec);
+    * `:closed` — connection that was closed would be removed from pool
+    as it's a final state;
+    * `{:timeout, not spended}`  — timeout happend, return how long is
+    it left to wait in microseconds.
 
   ## Timeouts
 
@@ -276,15 +369,29 @@ defprotocol Conn do
      to invalid connection (see `invalid?/1`) or connection with nonzero
      timeout through `Conns.Pool.fetch/2` / `Conns.Pool.take/2` and
      `Conns.Pool.get_first/4` / `Conns.Pool.take_first/4` functions. To
-     bypass, use `Conns.Pool.lookup/4`, `Conns.Pool.unsafe_get/2`,
-     `Conns.Pool.unsafe_take/2`, or their synonyms.
+     bypass, use `Conns.Pool.lookup/4` and `Conns.Pool.grab/2`.
   """
-  @spec state( Conn.t, method) :: :notsupported
-                                | :invalid
+  @spec state( Conn.t, method) :: :invalid
+                                | :closed
                                 | :ready
                                 | {:timeout, timeout}
   def state( conn, method)
 
+
+  @doc """
+  Close connection. This designed as a final state of conn. Connection
+  in this state should return `:closed` for all `methods/1` and after
+  successed close there can be no interactions.
+
+  Connection with `state/2` == `:closed` would be removed from pool as
+  soon as a pool find it. Trying to `put/2` such connection to pool
+  results in `{:error, :closed}`.
+
+  Use `Conns.Defaults` to define function `close/1` which always
+  returns `{:error, :notsupported}`.
+  """
+  @spec close( Conn.t) :: :ok | {:error, error | :notsupported}
+  def close( conn)
 
 
   @doc """

@@ -142,15 +142,15 @@ defmodule Conns.Pool do
   Be aware, that every function in `Pool` supports `POOL_ID` as the
   last argument. This way different pools can be used:
 
-      Conns.Pool.put( conn, {:pool, 0}) #add conn to pool #1
-      Conns.Pool.put( conn, {:pool, 1}) #add conn to pool #2
+      Conns.Pool.put( conn, pool: 0) #add conn to pool #1
+      Conns.Pool.put( conn, pool: 1) #add conn to pool #2
 
   ## Transactions
 
   Sagas-transactions would be added in next version of library.
   """
 
-  @type  id :: {:pool, nil | atom | String.t | non_neg_integer}
+  @type  id :: nil | atom | String.t | non_neg_integer
   @type  source :: any
   @type  auth_idx :: non_neg_integer
   @type  method_s :: Conn.method | [Conn.method] | :_
@@ -165,9 +165,9 @@ defmodule Conns.Pool do
   default name used — `:"Conns.Pool"`. If `pool_id` argument
   is given — it starts as `POOL_NAME.POOL_ID` or `:Conns.Pool.POOL_ID`.
   """
-  @spec start_link( id | {id, [source]}) :: GenServer.on_start
-  def start_link( id_and_sources \\ {{:pool, nil}, []}) do
-    __MODULE__.Server.start_link( id_and_sources)
+  @spec start_link( [sources: [], pool: id]) :: GenServer.on_start
+  def start_link( init_args \\ [sources: [], pool: nil]) do
+    __MODULE__.Server.start_link( init_args)
   end
 
 
@@ -196,8 +196,8 @@ defmodule Conns.Pool do
                              | {:error, :notfound
                                       | :invalid
                                       | {:timeout, timeout}}
-  def fetch( id, pool_id \\ {:pool, nil}) do
-    Server.name( pool_id)
+  def fetch( id, opts \\ [pool: nil]) do
+    Server.name( opts[:pool])
     |> GenServer.call( {:fetch, id})
   end
 
@@ -217,8 +217,8 @@ defmodule Conns.Pool do
                                                      | :ready
                                                      | {:timeout, timeout}}]}
                                 | {:error, :notfound}
-  def state_of( id, pool_id \\ {:pool, nil}) do
-    Server.name( pool_id)
+  def state_of( id, opts \\ [pool: nil]) do
+    Server.name( opts[:pool])
     |> GenServer.call( {:state_of, id})
   end
 
@@ -245,8 +245,8 @@ defmodule Conns.Pool do
                             | {:error, :notfound
                                      | :invalid
                                      | {:timeout, timeout}}
-  def take( id, pool_id \\ {:pool, nil}) do
-    Server.name( pool_id)
+  def take( id, opts \\ [pool: nil]) do
+    Server.name( opts[:pool])
     |> GenServer.call( {:take, id})
   end
 
@@ -264,15 +264,10 @@ defmodule Conns.Pool do
   connection is not `Conn.healthy?/1`. Call to `Conn.fix/2`
   connection can be applied.
   """
-  @spec put( Conn.t, id) :: Conn.id
-  def put( conn, pool_id \\ {:pool, nil}) do
-    Server.name( pool_id)
-    |> GenServer.call( {:put, conn})
-  end
-
-  def put( conn, spec, pool_id \\ {:pool, nil}) do
-    Server.name( pool_id)
-    |> GenServer.call( {:put, conn})
+  @spec put( Conn.t, [spec: Conn.spec, pool: id]) :: Conn.id
+  def put( conn, opts \\ [spec: [], pool: nil]) do
+    Server.name( opts[:pool])
+    |> GenServer.call( {:put, conn, opts[:spec]})
   end
 
 
