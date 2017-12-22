@@ -11,13 +11,13 @@ defmodule Conn.Defaults do
         use Conn.Defaults
 
         # Callbacks:
-        def init(_, _), do: …
         def source(_), do: …
         def state(_, _), do: …
         def call(_, _, _), do: …
         def methods(_), do: …
 
         # Optional callbacks:
+        def init(_, _), do: …
         def set_auth(_, _, _), do: …
         def undo(_, _, _), do: …
         def tags(_), do: …
@@ -63,6 +63,28 @@ defmodule Conn.Defaults do
   end
 
 
+  @doc """
+  Execute `Conn.fix/3` for every method that is `Conn.state/2`
+  `:invalid`.
+  """
+  @spec fix( Conn.t, keyword) :: {:ok, Conn.t}
+                               | {:error, Conn.error, Conn.t}
+                               | {:error, Conn.error}
+  def fix( conn, init_args) do
+    Conn.methods( conn)
+    |> Enum.reduce( conn, fn
+         method, {:ok, conn} ->
+           if Conn.state( conn, method) == :invalid do
+             Conn.fix( conn, method, init_args)
+           else
+             {:ok, conn}
+           end
+
+         _, error -> error
+       end)
+  end
+
+
   defmacro __using__(_) do
     quote do
 
@@ -71,6 +93,8 @@ defmodule Conn.Defaults do
       def delete_tag(_conn,_tag), do: :notsupported
 
       def tags(_conn), do: :notsupported
+
+      def fix( conn,_method, init_args), do: Conn.init( conn, init_args)
 
       def init( conn,_args), do: {:ok, conn}
 
@@ -88,101 +112,47 @@ end
 
 defprotocol Conn do
   @moduledoc """
-  Protocol represents abstract connection managed by `Conns.Pool`.
+  Protocol for connections managable by `Conns.Pool`.
+  It's a high level abstraction: underlying implementation can
+  use any transport mechanism; one or many sources can be
+  remote (for ex., some API) or VM-local such as `Agent`s,
+  `GenServer`s, etc.
 
   # Callbacks
 
-    * `call/3` — interact using given connection and specs;
-    * `sources/1` — get connection sources. *Commonly, it's a list
-    with a lonely single element*, but you can make connections that are
+    * `sources/1` — get connection sources. *Commonly it's a list
+    with a lonely single element* but you can make connections that are
     handling more than one source;
-    * `methods/1` — methods supported by connection;
+    * `methods/1` — methods supported in connection calls;
     * `state/2` — state of connection in respect of method
-      (`:ready` for interaction, `:invalid` and needs to be fixed,
-      have local timeout and was `:closed`);
+      (`:ready` for interaction; `:invalid` and needs to be fixed;
+      have local timeout; was `:closed`);
+    * `call/3` — interact using given connection and specs.
 
   ## Optional callbacks
 
     * `init/2` — initialize connection;
     * `fix/2` — try to fix connection that returns `state/2` == `:invalid`
        for specific method;
+
+    * `parse/2` — parse data in respect of connection context;
+
     * `tags/1` — tags associated with connection;
     * `add_tag/2` — associate tag with connection;
     * `delete_tag/2` — deassociate tag from connection;
+
     * `set_auth/3` — authenticate connection;
 
     * `undo/3` — support for Sagas-transaction mechanism.
-
-  ## Child spec
-
-  By analogy with `Supervisor` module, `Conns.Pool` treats connections as a
-  childs. By default, `Conns.Pool` will:
-
-  1. delete conn if it's came to final, `:closed` state;
-  2. try to `fix/2` connection if it's became `invalid?/1`;
-  3. try to `fix/3` connection if it's `state/2` == `:invalid` for
-  some of the `methods/1`;
-  4. recreate connection with given args if it failed to make steps 2 or 3.
-
-  This behaviour is easy to tune. All you need is to provide specs with
-  different triggers and actions. `Conns.Pool` has a builtin trigger&actions
-  system. For example, default behaviour is encoded as:
-
-      [__any__: [became(:invalid, do: :fix),
-                 unable(:fix, do: :recreate),
-                 became(:closed, do: :delete)],
-       __all__:  became(:invalid, do: :fix)]
-
-  The tuple element of the keyword has key `:__any__` (or `:_`) that means
-  "any of the connection `methods/1`". As a value, list of triggers&actions
-  were given. In this context, `became(:invalid, do: :fix)` means "if `state/2`
-  became equal to `:invalid`, do `fix/3` — `Conn.fix( conn, method, init_args)`".
-
-  Sometimes `fix/2` returns `{:error, _}` tuple, means we failed to fix
-  connection. That's where `unable` macros became handy. In `:_` context,
-  `unable(:fix, do: :recreate)` means "if `fix/3` failed, change connection
-  with a fresh copy".
-
-  In the `:__all__` context, `became(:invalid, do: fix)` means "if connection
-  is `invalid?/1`, do `fix/2`".
-
-  Contexts:
-
-  * `:_` | `__any__` — trigger activated for any of the `methods/1`;
-  * `__all__` — corresponds to situation when all the defined triggers are
-  fired, for example `__all__: [became(:timeout, do: [{:log, "Timeout!"}, :panic]), became(:invalid, do: :fix)]` means that if *all* the `methods/1` of connection
-  have timeout, pool will log the "Timeout!" message and after that
-  execute `:panic` action. Second trigger would be used if conn became
-  `invalid?/1`. This case `fix/2` would be called.
-
-  Available actions:
-
-  * `{:log, message}` — add log message;
-  * `:delete` — delete connection from pool;
-  * `:fix` — in `__all__` context call `fix/2` function, in all the other ones
-  call `fix/3`;
-  * `:recreate` — change connection with the a fresh version returned by
-  `init/2`.
-  * `({pool_id, conn_id, conn} -> [action])` — of course, in the `do block`
-  arbitrary function can be given;
-  * `[action]` — list of actions to make, for ex.: [:fix, :1]
-
-  Triggers:
-
-  * `became( new_state, do: action|actions)` — if given
-  * `became( new_state, mark: atom, do block)` — if given
-  * `tagged( new_tag, do block)`;
-  * `untagged( deleted_tag, do block)`;
-  * `unable( mark, do block)`.
   """
 
   @type  t :: any
   @type  id :: term
-  @type  method :: any
+  @type  method :: not_list
 
   @type  not_list :: term
 
-  @type  auth :: not_list
+  @type  auth :: any
   @type  tag :: any
   @type  source :: atom | String.t
   @type  error :: any
@@ -197,21 +167,28 @@ defprotocol Conn do
   @doc """
   Init connection. Options can be provided.
 
-  As init argument, connection pool provide at
-  least `{:source, source}` tuple.
+  As init argument, `Conns.Pool` provide at least
+  `[source: source]` keyword.
+
+  Module `Conn.Defaults` has default implementation of `init/2` that
+  just returns given conn. *Commonly, you would want to override it.*
   """
   @spec init( Conn.t, keyword) :: {:ok, Conn.t} | {:error, error}
   def init(_conn, args \\ [])
 
 
-  @doc """
-  Fix connection. Options can be provided.
 
-  As init argument, connection pool provide at
-  least `{:source, source}` tuple.
+  @doc """
+  Try to repair given method of conn interaction.
+  As a the argument provide options used in `init/2`.
+
+  Use `Conn.Defaults` to define `fix/2` that just
+  calls `init/2` with provided arguments.
   """
-  @spec fix( Conn.t, method) :: {:ok, Conn.t} | {:error, Conn.t}
-  def fix( conn, method)
+  @spec fix( Conn.t, method, keyword) :: {:ok, Conn.t}
+                                       | {:error, error, Conn.t}
+                                       | {:error, error}
+  def fix( conn, method, init_args)
 
 
   @doc """
@@ -308,9 +285,8 @@ defprotocol Conn do
     * `{:error, error, updated connection}`, if there was error while
     authentificating and it affects connection.
 
-  Module `Conns.Defaults` has default implementation of `set_auth/3`, that
-  return as a constant `{:error, :notsupported}` tuple for every conn, method
-  and auth.
+  Module `Conn.Defaults` has default implementation of `set_auth/3` that
+  returns as a constant `{:error, :notsupported}`.
   """
   @spec set_auth( Conn.t, method, auth) :: {:ok, :already | Conn.t}
                                         |  {:ok, :already, Conn.t}
@@ -321,12 +297,16 @@ defprotocol Conn do
 
   @doc """
   Interaction methods provided by connection. Can be http-methods:
-  :get, :put, :post, etc., or user defined :info, :say, :ask and
-  so on. They represents types of interactions can be done using
-  given connection.
+  :get, :put, :post, etc., or user defined arbitrary terms :info,
+  :say, :ask, {:method, 1} and so on. They represents types of
+  interactions can be done using given connection.
 
-  Moreover, every method can have it's own timeout and can separately
-  become invalid — see `state/2`.
+  Returns list of methods available for `call/3`.
+
+  This functions is actively used in "healthcare" mechanism provided
+  by pool. So if the methods list can change, it's better to use
+  some form of caching so pool will not block or slowdown while consult
+  with this function.
 
   ## Examples
 
@@ -339,6 +319,28 @@ defprotocol Conn do
   def methods( conn)
 
 
+  @doc """
+  Parse data in context of given connection. On success returns
+  `{source, method, payload}` and the rest of data to parse.
+
+  On parse error returns `{{:parse, data piece with error}, rest of data}`
+  or `{{:notsupported, method, data piece with error}, rest of data}` if
+  used method is not supported. Finally, it can return arbitrary
+  error with `{:error, error}`.
+
+  Use `Conn.Defaults` to define function `parse/2` to always return
+  `{:error, :notsupported}`.
+  """
+  @spec parse( Conn.t, data) :: {:ok, {{source, method, data
+                                                      | auth
+                                                      | {auth, data}}, data}}
+                              | {:error, {{:parse, data}, data}}
+                              | {:error, {{:notsupported, method, data}, data}}
+                              | {:error, :notsupported | error}
+  def parse(_conn, data)
+
+
+  defdelegate fix( conn, init_args), to: Conn.Defaults
   defdelegate invalid?( conn), to: Conn.Defaults
   defdelegate healthy?( conn), to: Conn.Defaults
   defdelegate authenticate( conn, method, auth), to: Conn.Defaults
@@ -367,9 +369,7 @@ defprotocol Conn do
      connection too frequently; (2) pool timeout, which can be setted by user,
      for example, in case of error happend. Pool will never give you access
      to invalid connection (see `invalid?/1`) or connection with nonzero
-     timeout through `Conns.Pool.fetch/2` / `Conns.Pool.take/2` and
-     `Conns.Pool.get_first/4` / `Conns.Pool.take_first/4` functions. To
-     bypass, use `Conns.Pool.lookup/4` and `Conns.Pool.grab/2`.
+     timeout. To bypass, use `Conns.Pool.lookup/4` and `Conns.Pool.grab/2`.
   """
   @spec state( Conn.t, method) :: :invalid
                                 | :closed
@@ -379,16 +379,17 @@ defprotocol Conn do
 
 
   @doc """
-  Close connection. This designed as a final state of conn. Connection
-  in this state should return `:closed` for all `methods/1` and after
-  successed close there can be no interactions.
+  Close connection. State `:closed` is designed as a final state of conn.
+  Connection in this state should return `:closed` for all `methods/1`.
+  There can be no after interactions.
 
-  Connection with `state/2` == `:closed` would be removed from pool as
-  soon as a pool find it. Trying to `put/2` such connection to pool
-  results in `{:error, :closed}`.
+  Normally, connection with `state/2` == `:closed` would be removed from
+  pool as soon as a pool sense that, but this can be tweaked using `Conns.Pool`
+  specs mechanism (see corresponding child spec section). Trying to `put/2`
+  such connection to pool results in `{:error, :closed}`.
 
-  Use `Conns.Defaults` to define function `close/1` which always
-  returns `{:error, :notsupported}`.
+  Use `Conn.Defaults` to define function `close/1` that always returns
+  `{:error, :notsupported}`.
   """
   @spec close( Conn.t) :: :ok | {:error, error | :notsupported}
   def close( conn)
@@ -396,11 +397,12 @@ defprotocol Conn do
 
   @doc """
   Add tag to given connection so later it can be filtered
-  using `tags/1` with `Conns.Pool.lookup/4` and
-  `Conns.Pool.*_first/4` functions.
+  using `tags/1` with any pool's function that supports
+  filter argument, such as `Conns.Pool.lookup/4`,
+  `Conns.Pool.take_first/4` and so on.
 
-  Use `Conns.Defaults` to define function `add_tag/2`, `delete_tag/2`
-  and `tags/1` which returns `:notsupported` atoms as a constant.
+  Use `Conn.Defaults` to define function `add_tag/2`, `delete_tag/2`
+  and `tags/1` to return `:notsupported`.
   """
   @spec add_tag( Conn.t, tag) :: Conn.t | :notsupported
   def add_tag( conn, tag)
@@ -409,8 +411,8 @@ defprotocol Conn do
   @doc """
   Delete tag from given connection.
 
-  Use `Conns.Defaults` to define function `add_tag/2`, `delete_tag/2`
-  and `tags/1` which returns `:notsupported` atoms as a constant.
+  Use `Conn.Defaults` to define function `add_tag/2`, `delete_tag/2`
+  and `tags/1` to return `:notsupported`.
   """
   @spec delete_tag( Conn.t, tag) :: Conn.t | :notsupported
   def delete_tag( conn, tag)
@@ -420,8 +422,8 @@ defprotocol Conn do
   All tags associated with given connection. Tags can be added via
   `Conn.add_tag/2` function and deleted via `Conn.delete_tag/2`.
 
-  Use `Conns.Defaults` to define functions `add_tag/2`, `delete_tag/2`
-  and `tags/1`, which returns `:notsupported` atoms as a constant.
+  Use `Conn.Defaults` to define function `add_tag/2`, `delete_tag/2`
+  and `tags/1` to return `:notsupported`.
   """
   @spec tags( Conn.t) :: [tag] | :notsupported
   def tags( conn)

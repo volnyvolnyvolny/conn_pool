@@ -146,6 +146,68 @@ defmodule Conns.Pool do
       Conns.Pool.put( conn, pool: 1) #add conn to pool #2
 
   ## Transactions
+  ## Child spec
+
+  By analogy with `Supervisor` module `Conns.Pool` treats connections as a
+  childs. By default `Conns.Pool` will:
+
+  1. delete conn if it's came to final, `:closed` state;
+  2. try to `Conn.fix/2` connection if it's became `Conn.invalid?/1`;
+  3. try to `Conn.fix/3` connection if it's `Conn.state/2` == `:invalid` for
+  some of the `Conn.methods/1`;
+  4. recreate connection with given args if it failed to make steps 2 or 3.
+
+  This behaviour is easy to tune. All you need is to provide specs with
+  different triggers and actions. `Conns.Pool` has a builtin trigger&actions
+  system. For example, default behaviour is encoded as:
+
+      [__any__: [became(:invalid, do: :fix),
+                 unable(:fix, do: :recreate),
+                 became(:closed, do: :delete)],
+       __all__:  became(:invalid, do: :fix)]
+
+  The tuple element of the keyword has key `:__any__` (or `:_`) that means
+  "any of the connection `Conn.methods/1`". As a value, list of triggers&actions
+  were given. In this context, `became(:invalid, do: :fix)` means "if
+  `Conn.state/2` became equal to `:invalid`, do
+  `Conn.fix/3` — `Conn.fix( conn, method, init_args)`".
+
+  Sometimes `Conn.fix/2` returns `{:error, _}` tuple, means we failed to fix
+  connection. That's where `unable` macros became handy. In `:_` context,
+  `unable(:fix, do: :recreate)` means "if `Conn.fix/3` failed, change
+  connection with a fresh copy".
+
+  In the `:__all__` context, `became(:invalid, do: fix)` means "if connection
+  is `Conn.invalid?/1`, do `Conn.fix/2`".
+
+  Contexts:
+
+  * `:_` | `__any__` — trigger activated for any of the `Conn.methods/1`;
+  * `__all__` — corresponds to situation when all the defined triggers are
+  fired, for example `__all__: [became(:timeout, do: [{:log, "Timeout!"}, :panic]), became(:invalid, do: :fix)]` means that if *all* the `Conn.methods/1`
+  of connection have timeout, pool will log the "Timeout!" message and
+  after that execute `:panic` action. Second trigger would be used if
+  conn became `Conn.invalid?/1`. This case `Conn.fix/2` would be called.
+
+  Available actions:
+
+  * `{:log, message}` — add log message;
+  * `:delete` — delete connection from pool;
+  * `:fix` — in `__all__` context call `Conn.fix/2` function, in all the
+  other ones call `Conn.fix/3`;
+  * `:recreate` — change connection with the a fresh version returned by
+  `Conn.init/2`.
+  * `({pool_id, conn_id, conn} -> [action])` — of course, in the `do block`
+  arbitrary function can be given;
+  * `[action]` — list of actions to make, for ex.: [:fix, :1]
+
+  Triggers:
+
+  * `became( new_state, do: action|actions)` — if given
+  * `became( new_state, mark: atom, do block)` — if given
+  * `tagged( new_tag, do block)`;
+  * `untagged( deleted_tag, do block)`;
+  * `unable( mark, do block)`.
 
   Sagas-transactions would be added in next version of library.
   """
