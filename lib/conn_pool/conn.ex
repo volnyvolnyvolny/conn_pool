@@ -88,6 +88,8 @@ defmodule Conn.Defaults do
   defmacro __using__(_) do
     quote do
 
+      def child_spec(_conn), do: []
+
       def add_tag(_conn,_tag), do: :notsupported
 
       def delete_tag(_conn,_tag), do: :notsupported
@@ -104,7 +106,10 @@ defmodule Conn.Defaults do
 
       def set_auth(_conn, _method, _auth), do: {:error, :notsupported}
 
-      defoverridable [add_tag: 2, delete_tag: 2, tags: 2, undo: 3, set_auth: 3]
+      defoverridable [child_spec: 1, init: 2, fix: 3, close: 1,
+                      add_tag: 2, delete_tag: 2, tags: 2,
+                      undo: 3,
+                      set_auth: 3]
     end
   end
 end
@@ -147,7 +152,7 @@ defprotocol Conn do
   """
 
   @type  t :: any
-  @type  id :: term
+  @type  id :: non_neg_integer
   @type  method :: not_list
 
   @type  not_list :: term
@@ -221,7 +226,7 @@ defprotocol Conn do
                                                          | {:ok, :noreply, Conn.t}
                                     | {:error, :needauth | error | {:timeout, timeout}}
                                     | {:error, :needauth | error, Conn.t}
-  def call( conn, method, load \\ nil)
+  def call( conn, method, payload \\ nil)
 
 
 
@@ -304,14 +309,13 @@ defprotocol Conn do
   Returns list of methods available for `call/3`.
 
   This functions is actively used in "healthcare" mechanism provided
-  by pool. So if the methods list can change, it's better to use
-  some form of caching so pool will not block or slowdown while consult
-  with this function.
+  by pool. So if the methods list will change, it's better to use
+  some form of caching so pool will not block or slowdown.
 
   ## Examples
 
       iex> source = %JSON_API{url: "http://example.com/api/v1"}
-      iex> {:ok, {id, conn}} = Pool.get_first( source, :info)
+      iex> {:ok, {id, conn}} = Pool.take_first( source, :info)
       iex> :info in Conn.methods( conn)
       true
   """
