@@ -7,11 +7,11 @@ defmodule Conn.Defaults do
 
   Use it like this:
 
-      defimpl Conn, for: MyStruct do
+      defimpl Conn, for: MyConn do
         use Conn.Defaults
 
         # Callbacks:
-        def source(_), do: …
+        def resource(_), do: …
         def state(_, _), do: …
         def call(_, _, _), do: …
         def methods(_), do: …
@@ -20,6 +20,12 @@ defmodule Conn.Defaults do
         def init(_, _), do: …
         def set_auth(_, _, _), do: …
         def undo(_, _, _), do: …
+        def close(_), do: …
+
+        def fix(_,_,_), do: …
+
+        def parse(_,_), do: …
+
         def tags(_), do: …
         def add_tag(_, _), do: …
         def delete_tag(_, _), do: …
@@ -27,8 +33,8 @@ defmodule Conn.Defaults do
   """
 
   @doc """
-  Connection is healthy if there is no method for which state function
-  returns `:invalid`?
+  Connection is healthy if there is no method for which `Conn.state/2`
+  function returns `:invalid`.
   """
   @spec healthy?( Conn.t) :: boolean
   def healthy?( conn) do
@@ -38,8 +44,8 @@ defmodule Conn.Defaults do
 
 
   @doc """
-  Connection is invalid if for every method provided by `Conn.methods/1`
-  connection returns `:invalid`?
+  Connection is invalid if for every method provided by `Conn.methods/1`,
+  `Conn.state/2` function returns `:invalid`.
   """
   @spec invalid?( Conn.t) :: boolean
   def invalid?( conn) do
@@ -53,8 +59,8 @@ defmodule Conn.Defaults do
   function. Returns `{:ok, conn}` or `{:error, conn}`, where `conn`
   is an updated version of connection.
   """
-  @spec authenticate( Conn.t, Conn.method, Conn.auth) :: {:ok | :error, Conn.t}
-  def authenticate( conn, method, auth) do
+  @spec authenticate( Conn.t, Conn.method | :__all__, Conn.auth) :: {:ok | :error, Conn.t}
+  def authenticate( conn, method \\ :__all__, auth) do
     case Conn.set_auth( conn, method, auth) do
       {:ok, conn} -> {:ok, conn}
       {status, _} -> {status, conn}
@@ -64,8 +70,8 @@ defmodule Conn.Defaults do
 
 
   @doc """
-  Execute `Conn.fix/3` for every method that is `Conn.state/2`
-  `:invalid`.
+  Execute `Conn.fix/3` for every method such that `Conn.state/2`
+  returns `:invalid`.
   """
   @spec fix( Conn.t, keyword) :: {:ok, Conn.t}
                                | {:error, Conn.error, Conn.t}
@@ -83,41 +89,6 @@ defmodule Conn.Defaults do
          _, error -> error
        end)
   end
-
-  @doc """
-  Send and receive data using given connection and method, where
-  *method is arbitrary term except list*.
-
-  For example you can use it to make http-connection with `Plug.Conn`:
-
-      Conn.call( conn, :get, "http://example.com")
-
-  ## Examples
-      iex> source = %JSON_API{url: "http://example.com/api/v1"}
-
-      iex> {:ok, conn} = Pool.take_first( source, [:say, :listen]) #takes conn from pool
-      iex> {:ok, conn} = Conn.call( conn, :say, what: "Hi!", name: "Louie")
-      iex> {:ok, "Hi Louie!"} = Conn.call( conn, :listen)
-      iex> {:ok, _id} = Pool.put( conn) #returns connection back to pool
-
-      Or:
-
-      iex> {:ok, {id, conn}} = Pool.get_first( source, [:say, :listen])
-      iex> {:ok, {conn, dialog_id}} = Conn.call( conn, :say, what: "Hi!", name: "Louie", opts: [:new_dialog])
-      iex> {:ok, {conn, "Hi Louie!"}} = Conn.call( conn, :listen, dialog_id: dialog_id)
-      iex> {:ok, conn} = Conn.call( conn, :say, what: "How are U?", dialog_id: dialog_id)
-      iex> Pool.update( id, conn)
-      iex> {:ok, ^conn} = Pool.fetch( id)
-      iex> {:ok, "Fine, tnx!"} = Conn.call( conn, :listen, dialog_id: dialog_id)
-  """
-  @spec call( Conn.t, Conn.method, Conn.data) :: :ok | {:ok, Conn.data} | {:ok, Conn.data, Conn.t}
-                                                         | {:ok, :noreply, Conn.t}
-                                    | {:error, :needauth | Conn.error | {:timeout, Conn.timeout}}
-                                    | {:error, :needauth | Conn.error, Conn.t}
-  def call( conn, method, payload \\ nil) do
-    Conn.call( conn, Conn.services( conn), method, payload)
-  end
-
 
   defmacro __using__(_) do
     quote do
@@ -138,7 +109,7 @@ defmodule Conn.Defaults do
 
       def undo(_conn,_method,_specs), do: {:error, :notsupported}
 
-      def set_auth(_conn, _method, _auth), do: {:error, :notsupported}
+      def set_auth(_conn, _method \\ :__all__, _auth), do: {:error, :notsupported}
 
       defoverridable [child_spec: 1, init: 2, fix: 3, close: 1,
                       add_tag: 2, delete_tag: 2, tags: 2,
@@ -151,11 +122,11 @@ end
 
 defprotocol Conn do
   @moduledoc """
-  Protocol for connections managable by `Conns.Pool`.
-  It's a high level abstraction: underlying implementation can
-  use any transport mechanism; one or many sources can be
-  remote (for ex., some API) or VM-local such as `Agent`s,
-  `GenServer`s, etc.
+  Protocol for connections that are managable by `Conns.Pool`.
+  It's a high level abstraction. Underlying implementation can
+  use any transport mechanism to connect with remote or VM-local
+  resources: `Agent`s, `GenServer`s and so on as different APIs and
+  any, of course, http-resources.
 
   # Callbacks
 
@@ -169,8 +140,8 @@ defprotocol Conn do
 
   ## Optional callbacks
 
-    * `init/2` — initialize connection;
-    * `fix/2` — try to fix connection that returns `state/2` == `:invalid`
+    * `init/2` — initialize connection with given arguments;
+    * `fix/3` — try to fix connection that returns `state/2` == `:invalid`
        for specific method;
 
     * `parse/2` — parse data in respect of connection context;
@@ -181,7 +152,7 @@ defprotocol Conn do
 
     * `set_auth/3` — authenticate connection;
 
-    * `undo/3` — support for Sagas-transaction mechanism.
+    * `undo/3` — support Sagas-transactions.
   """
 
   @type  t :: any
@@ -203,13 +174,12 @@ defprotocol Conn do
 
 
   @doc """
-  Init connection. Options can be provided.
-
-  As init argument, `Conns.Pool` provide at least
-  `[source: source]` keyword.
+  Init connection. Options could be provided. For example,
+  as init argument `Conns.Pool` provides at least `[source: source]`.
 
   Module `Conn.Defaults` has default implementation of `init/2` that
-  just returns given conn. *Commonly, you would want to override it.*
+  just returns given conn ignoring args. *Probably you would want
+  to override it.*
   """
   @spec init( Conn.t, keyword) :: {:ok, Conn.t} | {:error, error}
   def init(_conn, args \\ [])
@@ -230,76 +200,90 @@ defprotocol Conn do
 
 
   @doc """
-  Send and receive data using given connection and method, where
-  *method is arbitrary term except list*.
+  Interact using given connection and method.
 
-  For example you can use it to make http-connection with `Plug.Conn`:
+  For example, you can use this function with  `Plug.Conn` to
+  make http-requests:
 
       Conn.call( conn, :get, "http://example.com")
 
   ## Examples
-      iex> source = %JSON_API{url: "http://example.com/api/v1"}
+      resource = %JSON_API{url: "http://example.com/api/v1"}
 
-      iex> {:ok, conn} = Pool.take_first( source, [:say, :listen]) #takes conn from pool
-      iex> {:ok, conn} = Conn.call( conn, :say, what: "Hi!", name: "Louie")
-      iex> {:ok, "Hi Louie!"} = Conn.call( conn, :listen)
-      iex> {:ok, _id} = Pool.put( conn) #returns connection back to pool
+      # choose and take conn from pool that is capable of handle
+      # interaction with both :say and :listen methods
+      {:ok, conn} = Pool.take_first( resource, [:say, :listen])
+      {:ok, conn} = Conn.call( conn, :say, what: "Hi!", name: "Louie")
+      {:ok, "Hi Louie!"} = Conn.call( conn, :listen)
+      {:ok, _id} = Pool.put( conn) #returns connection back to pool
 
       Or:
 
-      iex> {:ok, {id, conn}} = Pool.get_first( source, [:say, :listen])
-      iex> {:ok, {conn, dialog_id}} = Conn.call( conn, :say, what: "Hi!", name: "Louie", opts: [:new_dialog])
-      iex> {:ok, {conn, "Hi Louie!"}} = Conn.call( conn, :listen, dialog_id: dialog_id)
-      iex> {:ok, conn} = Conn.call( conn, :say, what: "How are U?", dialog_id: dialog_id)
-      iex> Pool.update( id, conn)
-      iex> {:ok, ^conn} = Pool.fetch( id)
-      iex> {:ok, "Fine, tnx!"} = Conn.call( conn, :listen, dialog_id: dialog_id)
+      {:ok, conn} = Pool.take_first( resource, [:say, :listen])
+      {:ok, {conn, dialog_id}} = Conn.call( conn, :say, what: "Hi!", name: "Louie", new_dialog: true)
+      {:ok, {conn, "Hi Louie!"}} = Conn.call( conn, :listen, dialog_id: dialog_id)
+      {:ok, conn} = Conn.call( conn, :say, what: "How are U?", dialog_id: dialog_id)
+      Pool.put( conn, id: 1)
+      {:ok, ^conn} = Pool.take( 1)
+      {:ok, "Fine, tnx!"} = Conn.call( conn, :listen, dialog_id: dialog_id)
   """
-  @spec call( Conn.t, sources, method, data) :: :ok | {:ok, data} | {:ok, data, Conn.t}
-                                                                  | {:ok, :noreply, Conn.t}
-                                             | {:error, :needauth | error | {:timeout, timeout}}
-                                             | {:error, :needauth | error, Conn.t}
-  def call( conn, sources, method, payload)
+  @spec call( Conn.t, Conn.method, keyword) :: :ok | {:ok, Conn.data}
+                                                   | {:ok, Conn.data
+                                                         | :noreply, Conn.t}
+                                            |  {:error, :needauth
+                                                      | Conn.error
+                                                      | {:timeout, Conn.timeout}}
+                                            |  {:error, :needauth
+                                                        | Conn.error, Conn.t}
+  def call( conn, method, payload \\ [])
 
 
 
   @doc """
-  Undo changes maded by `Conn.call/3`. This used in Sagas-transactions.
-  If you don't use transactions over multiple connections use default
-  implementation provided by `Conn.Defaults` which returns
-  `{:error, :unsupported}` tuple for every conn, method and spec given
+  Undo changes that were maded by `Conn.call/3`. This used in
+  Sagas-transactions.
+
+  If you don't use transactions over multiple connections, use default
+  implementation provided by `Conn.Defaults` that returns
+  `{:error, :unsupported}` tuple for every conn, method and payload given
   as an argument.
 
   ## Examples
 
-      iex> source = %JSON_API{url: "http://example.com/api/v1"}
+      resource = %JSON_API{url: "http://example.com/api/v1"}
 
-      iex> {:ok, conn} = Pool.take_first( source, [:say, :listen]) #takes conn from pool
-      iex> {:ok, conn} = Conn.call( conn, :say, %{what: "Hi!", name: "Louie"})
-      iex> :ok = Conn.undo( conn, :say)
-      iex> {:ok, _id} = Pool.put( conn) #return connection back to pool
+      {:ok, conn} = Pool.take_first( resource, [:say, :listen])
+      {:ok, conn} = Conn.call( conn, :say, what: "Hi!", name: "Louie")
+
+      :ok = Conn.undo( conn, :say, what: "Hi!", name: "Louie")
+
+      # or, maybe, simply:
+      # :ok = Conn.undo( conn, :say) #as payload doesn't matters here
+      {:ok, _id} = Pool.put( conn) #return connection to pool
   """
   @spec undo( Conn.t, method, keyword) :: :ok
-                                       | {:ok, Conn.t}
-                                       | {:error, any, Conn.t}
-                                       | {:error, :unsupported}
-                                       | {:error, {:timeout, timeout}}
-  def undo( conn, method, specs \\ [])
+                                        | {:ok, Conn.t}
+                                        | {:error, any, Conn.t}
+                                        | {:error, :unsupported}
+                                        | {:error, {:timeout, timeout}}
+  def undo( conn, method, payload_used_in_call \\ [])
 
 
   @doc """
   Resource that is handled by connection.
 
-  You can return list of resources. If you make connection that
-  handles multiple resources, maybe it's a good idea to pass
-  additional `:resources` param to `call/3` function, so it you can .
+  You can return list of resources instead if you are making
+  connection that handles multiple resources. Also, in this case
+  it's a good idea to pass additional `:resources` param to
+  `call/3` function as a hint.
 
   ## Examples
 
-      iex> source = %JSON_API{url: "http://example.com/api/v1"}
-      iex> {:ok, conn} = Pool.take_first( source, :info)
-      iex> Conn.source( conn).url
-      "http://example.com/api/v1"
+      resource = %JSON_API{url: "http://example.com/api/v1"}
+      {:ok, conn} = Pool.take_first( resource, :info)
+
+      # now:
+      Conn.resource( conn).url == "http://example.com/api/v1"
   """
   @spec resource( Conn.t) :: resource | [resource]
   def resource( conn)
@@ -308,30 +292,28 @@ defprotocol Conn do
   @doc """
   Authenticate connection for given method.
 
-  It's easy to use it through `authenticate/3` function.
+  It's a lot easier to use `authenticate/3` wrapper-function instead.
 
   ## Returns
 
     * `{:ok, updated conn}` — authentication succeed, return updated connection;
-    * `{:ok, :already}` — connection is already authenticated. It was not
-    changed, so no need to return it;
-    * `{:ok, :already, updated conn}` — connection is already authenticated,
+    * `{:ok, :already}` — if connection is already authenticated;
+    * `{:ok, :already, updated conn}` — if connection is already authenticated
     and it was changed while tested;
     * `{:error, :notsupported}`, if authentification is not supported for this
     connection and method.
-    * `{:error, other error}`, if there was error while authentificating
-    and it's not affects connection.
+    * `{:error, other error}`, if there was error while making auth;
     * `{:error, error, updated connection}`, if there was error while
-    authentificating and it affects connection.
+    making auth that changes connection.
 
   Module `Conn.Defaults` has default implementation of `set_auth/3` that
-  returns as a constant `{:error, :notsupported}`.
+  returns `{:error, :notsupported}` tuple constantly.
   """
-  @spec set_auth( Conn.t, method, auth) :: {:ok, :already | Conn.t}
-                                        |  {:ok, :already, Conn.t}
-                                        |  {:error, :notsupported | error}
-                                        |  {:error, :notsupported | error, Conn.t}
-  def set_auth( conn, method, auth)
+  @spec set_auth( Conn.t, method | :__all__, auth) :: {:ok, :already | Conn.t}
+                                                   |  {:ok, :already, Conn.t}
+                                                   |  {:error, :notsupported | error}
+                                                   |  {:error, :notsupported | error, Conn.t}
+  def set_auth( conn, method \\ :__all__, auth)
 
 
   @doc """
@@ -343,15 +325,16 @@ defprotocol Conn do
   Returns list of methods available for `call/3`.
 
   This functions is actively used in "healthcare" mechanism provided
-  by pool. So if the methods list will change, it's better to use
-  some form of caching so pool will not block or slowdown.
+  by pool. So if methods will change, it's better to use some form of
+  caching, so pool will not block or slowdown.
 
   ## Examples
 
-      iex> source = %JSON_API{url: "http://example.com/api/v1"}
-      iex> {:ok, {id, conn}} = Pool.take_first( source, :info)
-      iex> :info in Conn.methods( conn)
-      true
+      resource = %JSON_API{url: "http://example.com/api/v1"}
+      {:ok, conn} = Pool.take_first( resource, :info)
+
+      # now:
+      :info in Conn.methods( conn)
   """
   @spec methods( Conn.t) :: [method]
   def methods( conn)
@@ -359,19 +342,18 @@ defprotocol Conn do
 
   @doc """
   Parse data in context of given connection. On success returns
-  `{source, method, payload}` and the rest of data to parse.
+  `{{method, payload}, rest of the data}`.
 
   On parse error returns `{{:parse, data piece with error}, rest of data}`
   or `{{:notsupported, method, data piece with error}, rest of data}` if
   used method is not supported. Finally, it can return arbitrary
   error with `{:error, error}`.
 
-  Use `Conn.Defaults` to define function `parse/2` to always return
-  `{:error, :notsupported}`.
+  Use `Conn.Defaults` to define function `parse/2` to make this function
+  always return `{:error, :notsupported}`.
   """
-  @spec parse( Conn.t, data) :: {:ok, {{source, method, data
-                                                      | auth
-                                                      | {auth, data}}, data}}
+  @spec parse( Conn.t, data) :: {:ok, {{method, data | auth
+                                              | {auth, data}}, data}}
                               | {:error, {{:parse, data}, data}}
                               | {:error, {{:notsupported, method, data}, data}}
                               | {:error, :notsupported | error}
@@ -381,33 +363,33 @@ defprotocol Conn do
   defdelegate fix( conn, init_args), to: Conn.Defaults
   defdelegate invalid?( conn), to: Conn.Defaults
   defdelegate healthy?( conn), to: Conn.Defaults
-  defdelegate authenticate( conn, method, auth), to: Conn.Defaults
+  defdelegate authenticate( conn, method \\ :__all__, auth), to: Conn.Defaults
 
 
   @doc """
   Connection state for given method of interaction.
 
-  If method argument is not in the `methods/1` list then it's common to
-  raise an runtime error.
+  If method argument is not in the `methods/1` list — it's common to
+  raise a runtime error.
 
-  ## Return atoms:
+  ## Returns
 
     * `:ready` | `{:timeout, 0}` — ready for given method interaction;
     * `:invalid` — connection is broken for this method of interaction.
-    You can try to `fix/2` it manually or set up pool trigger that will
+    You can try to `fix/3` it manually or set up pool trigger that will
     do that automagically — see `Conns.Pool.put/2` and [Spec section](#module-child-spec);
-    * `:closed` — connection that was closed would be removed from pool
-    as it's a final state;
-    * `{:timeout, not spended}`  — timeout happend, return how long is
+    * `:closed` — connection that was closed will be removed from pool;
+    * `{:timeout, not spended}` — timeout happend, return how long is
     it left to wait in microseconds.
 
   ## Timeouts
 
-     System has two timeouts: (1) refresh rate, which prevents from using
-     connection too frequently; (2) pool timeout, which can be setted by user,
+     System has two timeouts: (1) refresh rate that prevents from using
+     connection too frequently; (2) pool timeout that can be setted by user,
      for example, in case of error happend. Pool will never give you access
-     to invalid connection (see `invalid?/1`) or connection with nonzero
-     timeout. To bypass, use `Conns.Pool.lookup/4` and `Conns.Pool.grab/2`.
+     to invalid connection (see `invalid?/1`), connection with nonzero
+     timeout and connection in state `:closed`. To bypass (access to invalid
+     or timeout conn) use `Conns.Pool.lookup/4` and `Conns.Pool.grab/2`.
   """
   @spec state( Conn.t, method) :: :invalid
                                 | :closed
@@ -417,14 +399,15 @@ defprotocol Conn do
 
 
   @doc """
-  Close connection. State `:closed` is designed as a final state of conn.
-  Connection in this state should return `:closed` for all `methods/1`.
-  There can be no after interactions.
+  Close connection. There can be no after interactions as state `:closed`
+  is final.
 
   Normally, connection with `state/2` == `:closed` would be removed from
   pool as soon as a pool sense that, but this can be tweaked using `Conns.Pool`
   specs mechanism (see corresponding child spec section). Trying to `put/2`
   such connection to pool results in `{:error, :closed}`.
+
+  Closed connections should return `:closed` for all the `methods/1`.
 
   Use `Conn.Defaults` to define function `close/1` that always returns
   `{:error, :notsupported}`.
@@ -435,9 +418,8 @@ defprotocol Conn do
 
   @doc """
   Add tag to given connection so later it can be filtered
-  using `tags/1` with any pool's function that supports
-  filter argument, such as `Conns.Pool.lookup/4`,
-  `Conns.Pool.take_first/4` and so on.
+  using `tags/1` with `Conns.Pool.lookup/4`, `Conns.Pool.take_first/4`
+  and any other pool's function that supports filter argument.
 
   Use `Conn.Defaults` to define function `add_tag/2`, `delete_tag/2`
   and `tags/1` to return `:notsupported`.
