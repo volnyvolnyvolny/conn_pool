@@ -84,6 +84,40 @@ defmodule Conn.Defaults do
        end)
   end
 
+  @doc """
+  Send and receive data using given connection and method, where
+  *method is arbitrary term except list*.
+
+  For example you can use it to make http-connection with `Plug.Conn`:
+
+      Conn.call( conn, :get, "http://example.com")
+
+  ## Examples
+      iex> source = %JSON_API{url: "http://example.com/api/v1"}
+
+      iex> {:ok, conn} = Pool.take_first( source, [:say, :listen]) #takes conn from pool
+      iex> {:ok, conn} = Conn.call( conn, :say, what: "Hi!", name: "Louie")
+      iex> {:ok, "Hi Louie!"} = Conn.call( conn, :listen)
+      iex> {:ok, _id} = Pool.put( conn) #returns connection back to pool
+
+      Or:
+
+      iex> {:ok, {id, conn}} = Pool.get_first( source, [:say, :listen])
+      iex> {:ok, {conn, dialog_id}} = Conn.call( conn, :say, what: "Hi!", name: "Louie", opts: [:new_dialog])
+      iex> {:ok, {conn, "Hi Louie!"}} = Conn.call( conn, :listen, dialog_id: dialog_id)
+      iex> {:ok, conn} = Conn.call( conn, :say, what: "How are U?", dialog_id: dialog_id)
+      iex> Pool.update( id, conn)
+      iex> {:ok, ^conn} = Pool.fetch( id)
+      iex> {:ok, "Fine, tnx!"} = Conn.call( conn, :listen, dialog_id: dialog_id)
+  """
+  @spec call( Conn.t, Conn.method, Conn.data) :: :ok | {:ok, Conn.data} | {:ok, Conn.data, Conn.t}
+                                                         | {:ok, :noreply, Conn.t}
+                                    | {:error, :needauth | Conn.error | {:timeout, Conn.timeout}}
+                                    | {:error, :needauth | Conn.error, Conn.t}
+  def call( conn, method, payload \\ nil) do
+    Conn.call( conn, Conn.services( conn), method, payload)
+  end
+
 
   defmacro __using__(_) do
     quote do
@@ -125,9 +159,8 @@ defprotocol Conn do
 
   # Callbacks
 
-    * `sources/1` — get connection sources. *Commonly it's a list
-    with a lonely single element* but you can make connections that are
-    handling more than one source;
+    * `resource/1` — resource for corresponding connection. *It's
+    not forbidden to return list of resources*;
     * `methods/1` — methods supported in connection calls;
     * `state/2` — state of connection in respect of method
       (`:ready` for interaction; `:invalid` and needs to be fixed;
@@ -159,7 +192,7 @@ defprotocol Conn do
 
   @type  auth :: any
   @type  tag :: any
-  @type  source :: atom | String.t
+  @type  resource :: atom | String.t
   @type  error :: any
   @type  data :: any
 
@@ -222,11 +255,11 @@ defprotocol Conn do
       iex> {:ok, ^conn} = Pool.fetch( id)
       iex> {:ok, "Fine, tnx!"} = Conn.call( conn, :listen, dialog_id: dialog_id)
   """
-  @spec call( Conn.t, method, data) :: :ok | {:ok, data} | {:ok, data, Conn.t}
-                                                         | {:ok, :noreply, Conn.t}
-                                    | {:error, :needauth | error | {:timeout, timeout}}
-                                    | {:error, :needauth | error, Conn.t}
-  def call( conn, method, payload \\ nil)
+  @spec call( Conn.t, sources, method, data) :: :ok | {:ok, data} | {:ok, data, Conn.t}
+                                                                  | {:ok, :noreply, Conn.t}
+                                             | {:error, :needauth | error | {:timeout, timeout}}
+                                             | {:error, :needauth | error, Conn.t}
+  def call( conn, sources, method, payload)
 
 
 
@@ -255,10 +288,11 @@ defprotocol Conn do
 
 
   @doc """
-  Given connection sources.
+  Resource that is handled by connection.
 
-  Commonly, it’s a list with a lonely single element, `[single source]`,
-  but you can make connections that are handling more than one source.
+  You can return list of resources. If you make connection that
+  handles multiple resources, maybe it's a good idea to pass
+  additional `:resources` param to `call/3` function, so it you can .
 
   ## Examples
 
@@ -267,8 +301,8 @@ defprotocol Conn do
       iex> Conn.source( conn).url
       "http://example.com/api/v1"
   """
-  @spec sources( Conn.t) :: [source]
-  def sources( conn)
+  @spec resource( Conn.t) :: resource | [resource]
+  def resource( conn)
 
 
   @doc """
