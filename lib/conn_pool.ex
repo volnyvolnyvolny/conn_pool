@@ -1,19 +1,10 @@
 defmodule Conns.Pool do
   @moduledoc """
-  Connection pool is `Conn`s manager. It supports searching
-  connections and taking/returning or directly using them
-  from pool. Conn can be returned with timeout to prevent
-  using it whithin specific period of time.
+  `Conn`s manager.
 
-  Start connections pool via `start_link/1` function.
-  It starts as a local named service `:"Conns.Pool"`
-  but this can be changed, just configure `POOL_NAME`
-  application attribute.
+  To start one or more pools use `start_link/1`.
 
-  Multiple pools could be started by using `:pool` param
-  (give it to `start_link/1`).
-
-  Preferred and safe way of interacting with pool is:
+  Now:
 
   **Step 1. Provide pool with connections**
 
@@ -27,7 +18,7 @@ defmodule Conns.Pool do
       Conns.init( resource)
       |> Enum.each(&Conns.Pool.put/2)
 
-  the latter requires `Conns` protocol to be implemented for given
+  the latter requires `Conns` protocol to be implemented for the given
   resource.
 
   If you provide `start_link/1` with param `:resource` — it will initialize
@@ -35,23 +26,25 @@ defmodule Conns.Pool do
 
   **Step 2a. Select and use connection**
 
-  Use `Conns.Pool.call_first/4` or `Conns.Pool.cast_first/4` to select
-  connection that is capable to interact via given method and make a
-  `Conn.call/3` from process spawned by pool.
+  Use `Conns.Pool.choose_and_call/4` or `Conns.Pool.choose_and_cast/4` to select
+  connection that is capable to interact via given method and make `Conn.call/3`
+  from process spawned by pool.
 
-      {:ok, conn} = Conns.Pool.call_first( resource, :say, fn conn ->
+      {:ok, conn} = Conns.Pool.choose_and_call( resource, :say, fn conn ->
                       # use filter to select preferred conn
                       :reserved in Conn.tags( conn)
                     end,
                     name: "Louie",
                     what: "Hi!")
 
+  Cast is a call & forget and returns `:ok` immediately.
+
   **Step 2b. Select and take connection**
 
-  Use `Conns.Pool.take_first/3` to take connection that is capable
+  Use `Conns.Pool.choose_and_take/4` to take connection that is capable
   to interact via given methods:
 
-      {:ok, conn} = Conns.Pool.take_first( resource, [:say, :listen], fn conn ->
+      {:ok, conn} = Conns.Pool.choose_and_take( resource, [:say, :listen], fn conn ->
                       # use filter to select preferred conn
                       :reserved in Conn.tags( conn)
                     end)
@@ -60,11 +53,10 @@ defmodule Conns.Pool do
   **Step 3b. Use connection**
 
   Use `Conn.call/3` on connection that is taken as written in (2b).
-  Cast is a call & forget and returns `:ok` immediately.
 
   **Step 4b. Return connection back to pool**
 
-  Connection can be returned using `put/2`. In case of error timeout
+  Connection can be returned using `put/2`. In case of error, timeout
   can be provided to prevent using connection by others (conn still
   could be `grab/2`ed).
 
@@ -88,8 +80,8 @@ defmodule Conns.Pool do
 
       Conns.Pool.lookup(:_, [])
 
-  It's *highly advised* to use `take_first/3`, `call_first/4` or
-  `cast_first/4` functions instead as they respects timeouts and
+  It's *highly advised* to use `choose_and_take/4`, `choose_and_call/4` or
+  `choose_and_cast/4` functions instead, as they respects timeouts and
   `:invalid` `Conn.state/2`s.
 
   Connection with known id can be `take/2`n from pool. Thats
@@ -178,7 +170,7 @@ defmodule Conns.Pool do
   ## Unsafe operations
 
   Concurrent use of copies of the same connection is unsafe.
-  But if you are confident, you can always bypass:
+  But if you are confident, it's easy to bypass:
 
       conn_id = 1
       {:ok, conn, _} = Conns.Pool.take( conn_id)
@@ -190,17 +182,75 @@ defmodule Conns.Pool do
   @type  id :: nil | atom | String.t | non_neg_integer
   @type  method_s :: Conn.method | [Conn.method] | :_
 
+
+  @name System.get_env("POOL_NAME") || :"Conns.Pool"
+
+
   alias Conns.Pool.Server
+
+  @doc """
+  Pool name for given id. This function helps when starting
+  a lot of similar pools. It generates pool names based
+  on id given.
+
+  Default name `{:Conns.Pool, pool_id}` can be changed.
+  Just add:
+
+      config :conn_pool,
+        POOL_NAME: :OtherName # → {:OtherName, pool_id}
+
+      # or
+
+      config :conn_pool,
+        POOL_NAME: {:global, :OtherName} # → {:global, {:OtherName, pool_id}}
+
+      # or
+
+      config :conn_pool,
+        POOL_NAME: {:via, Module, :OtherName} # → {:via, Module, {:OtherName, pool_id}}
+
+  to your config file. Also, see [article](https://hexdocs.pm/elixir/GenServer.html#module-name-registration).
+
+  Mostly, it used as:
+
+      start_link( name: name( 123)) # by default it starts pool {:Conns.Pool, 123}
+
+      take( conn_id, pool: name( 123)) # take/2 conn with given id from pool {:Conns.Pool, 123}
+  """
+  def name( pool_id, gen \\ fn term, id -> {term, id} end) do
+    case @name do
+      {:global, term} -> {:global, gen.( term, pool_id)}
+      {:via, module, term} -> {:via, module, gen.( term, pool_id)}
+      term -> gen.( term, pool_id)
+    end
+  end
 
 
   @doc """
-  Start connections pool. If variable `POOL_NAME` configured,
-  pool process starts with the given name. Otherwise, default
-  (local) name used — `:"Conns.Pool"`. If pool id provided,
-  pool name would be `POOL_NAME.\#{:id}` or `:Conns.Pool.\#{:id}`.
+  Starts pool as a linked named process.
+
+  By default pool is registered locally, under the
+  name `:"Conns.Pool"`. In case we would like to start
+  many similar pools, `:name` param can be given:
+
+      start_link( name: {:local, :OtherName})
+
+     or:
+
+      start_link( name: name( 123)) # by default starts local pool {:Conns.Pool, 123}
+
+     or:
+
+      start_link( name: {:global, :OtherName})
+
+     or:
+
+      start_link( name: {:via, :global, :OtherName})
+
+  see `name/1` docs.
   """
-  @spec start_link( [sources: [Conn.source], pool: id]) :: GenServer.on_start
-  def start_link( init_args \\ [sources: [], pool: nil]) do
+  @spec start_link( [resources: [Conn.resource], pool: id]) :: GenServer.on_start
+  def start_link( init_args \\ [resources: [], pool: nil, specs: []]) do
     __MODULE__.Server.start_link( init_args)
   end
 
@@ -295,9 +345,8 @@ defmodule Conns.Pool do
   @doc """
   Put connection to pool.
 
-  Pool respects order in which connections has been putted
-  (timestamps are used as ids). So on any `*_first` call
-  conns that injected earlier will be returned.
+  Pool respects order. As ids timestamps used. So on any
+  `*_first` call conns that injected earlier will be returned.
 
   In a highly unliked event when `:id` param is given and
   there is already connection exists with such id runtime
