@@ -10,22 +10,12 @@ defmodule Conns.Pool.Server do
 
 # #   import Enum, only: [map: 2]
 
-  @name System.get_env("POOL_NAME") || :"Conns.Pool"
-
-
-  @doc """
-  GenServer name for given pool id. Supports `{:global, term}`
-  and `{:via, module, term}`. You have no need to call this
-  function, just pass pool id as the last argument of pool
-  functions.
-  """
-  def name( {:pool, id}), do: name( id)
-
-  def name( pool_id) do
-    case @name do
-      {:global, term} -> {:global, {term, pool_id}}
-      {:via, module, term} -> {:via, module, {term, pool_id}}
-      atom -> :"#{atom}#{if pool_id do "."<>to_string( pool_id) end}"
+  # Generate uniq id
+  defp gen_id({table, max_id}) do
+    if :os.system_time(:microsecond) < max_id do
+      raise "Error! System time changed! Id ordering cannot be guaranted!"
+    else
+     :os.system_time(:microsecond)
     end
   end
 
@@ -34,27 +24,51 @@ defmodule Conns.Pool.Server do
   Initialize server.
 
   If sources list provided, `Conns.init` call made for every
-  source and returned connections are added to pool as they are.
+  resource and connections returned are added to pool.
   """
-  def init( {pool_id, sources}) do
+  def init( args) do
     :rand.seed(:exsp)
 
-    table = :ets.new(:_, [:ordered_set, :private])
+     table = :ets.new(:_, [:ordered_set, :private])
 
-    Enum.flat_map( sources, &Conns.init/1)
-    |> Enum.each(& handle_call( {:put, &1}, self(), table))
+     args[:resources]
+  |> Enum.flat_map(&Conns.init/1)
+  |> Enum.each(& handle_call( {:put, &1, 0, nil}, self(), {table, 0}))
 
-    {:ok, table}
+     {:ok, {table, 0}}
   end
+
 
   @doc """
   Starts corresponding GenServer. Use `Conns.Pool.start_link/1` instead.
   """
-  def start_link( {{:pool, id},_sources}=init_args) do
-    GenServer.start_link(__MODULE__, init_args, name: name( {:pool, id}))
+  def start_link( init_args) do
+    GenServer.start_link(__MODULE__, init_args, name: init_args[:name])
   end
 
 
+  def handle_call( {:put, conn, timeout, id}, _from, {table,_}) do
+    id = id || gen_id( table)
+    :ets.insert( table, {id, timeout, conn})
+
+    {:reply, id, {table, id}}
+  end
+
+  def handle_call( {:grab, id}, _from, {table,id}) do
+    case :ets.lookup( table, id) do
+      [{^id, timeout, conn}] ->
+        warnings = Conn.warnings( conn)
+
+        if Enum.any?( warnings, fn {_,state} -> state == :closed end) do
+          {:reply, {:error, :closed}, {table, id}}
+        else
+          {:reply, {:ok, conn, warnings}, {table, id}}
+        end
+
+      [] ->
+        {:reply, {:error, :notfound}, {table, id}}
+    end
+  end
 
 # #   # Given spec match tuple?
 # #   defp match_spec( {_,_,conn}=tuple, {source_id, data_type, auth}) do
@@ -78,14 +92,6 @@ defmodule Conns.Pool.Server do
 # #     end, nil, table)
 # #   end
 
-#   # Generate uniq id.
-#   defp gen_id( table) do
-#     if :ets.member( table, id = :rand.uniform( 1000000000000)) do
-#       gen_id( table)
-#     else
-#       id
-#     end
-#   end
 
 
 # #   #———————————————————————————————————————————————————————————
@@ -112,13 +118,6 @@ defmodule Conns.Pool.Server do
 #     end
 #   end
 
-
-#   def handle_call( {:put, conn}, _from, table) do
-#     id = gen_id( table)
-#     :ets.insert( table, {id, nil, conn})
-
-#     {:reply, id, table}
-#   end
 
 #   def handle_call( {:update_conn, {id, conn}}, _from, table) do
 #     case :ets.lookup( table, id) do

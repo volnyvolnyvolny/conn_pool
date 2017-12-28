@@ -1,9 +1,6 @@
 defmodule Conns.Pool do
   @moduledoc """
-  `Conn`s manager.
-
-  To start one or more pools use `start_link/1`.
-
+  `Conn`s manager. To start single or multiple pools use `start_link/1`.
   Now:
 
   **Step 1. Provide pool with connections**
@@ -22,9 +19,9 @@ defmodule Conns.Pool do
   resource.
 
   If you provide `start_link/1` with param `:resource` — it will initialize
-  pool using `Enum.flat_map( opts[:resource], &Conns.init/1)`.
+  pool with `Enum.flat_map( opts[:resource], &Conns.init/1)` conns.
 
-  **Step 2a. Select and use connection**
+  **Step 2a. Choose and use connection**
 
   Use `Conns.Pool.choose_and_call/4` or `Conns.Pool.choose_and_cast/4` to select
   connection that is capable to interact via given method and make `Conn.call/3`
@@ -34,12 +31,11 @@ defmodule Conns.Pool do
                       # use filter to select preferred conn
                       :reserved in Conn.tags( conn)
                     end,
-                    name: "Louie",
-                    what: "Hi!")
+                    name: "Louie", what: "Hi!")
 
-  Cast is a call & forget and returns `:ok` immediately.
+  Cast is a call & forget and returns `:ok` immediatly on choose success.
 
-  **Step 2b. Select and take connection**
+  **Step 2,3,4b. Choose and take and use and return connection**
 
   Use `Conns.Pool.choose_and_take/4` to take connection that is capable
   to interact via given methods:
@@ -49,12 +45,9 @@ defmodule Conns.Pool do
                       :reserved in Conn.tags( conn)
                     end)
 
+  Use `Conn.call/3` on choosed connection:
 
-  **Step 3b. Use connection**
-
-  Use `Conn.call/3` on connection that is taken as written in (2b).
-
-  **Step 4b. Return connection back to pool**
+      :ok = Conn.call conn, :say, what: "Hi!", name: "Louie"
 
   Connection can be returned using `put/2`. In case of error, timeout
   can be provided to prevent using connection by others (conn still
@@ -62,7 +55,7 @@ defmodule Conns.Pool do
 
   ## Unsafe
 
-  Connection can be choosen with `lookup/3` function.
+  Connections could be selected via `lookup/4` function.
 
       resource = %JSON_API{url: "http://example.com/api/v1"}
 
@@ -98,11 +91,26 @@ defmodule Conns.Pool do
   Be aware, that every function in `Pool` supports `pool: id` param.
   This way different pools can be used:
 
-      Conns.Pool.put( conn, pool: 0) #add conn to pool #1
-      Conns.Pool.put( conn, pool: 1) #add conn to pool #2
+      import Conns.Pool, only: [name: 2]
+
+      Conns.Pool.put( conn, pool: name( 1)) #add conn to pool #1
+      Conns.Pool.put( conn, pool: name( 2)) #add conn to pool #2
+
+  Also, you can use copies of the same connection concurently:
+
+      conn_id = 1
+      {:ok, conn, _} = Conns.Pool.take( conn_id)
+      Conns.Pool.put( conn, id: conn_id)
+      # use conn while it's still available
+      # for others by the same id
+
+  This is **not recommended**. Use it only if copies of conns don't
+  share state!
 
   ## Transactions
-  ## Child spec
+  Sagas-transactions would be added in the next version of library.
+
+  ## Health care
 
   By analogy with `Supervisor` module `Conns.Pool` treats connections as a
   childs. By default `Conns.Pool` will:
@@ -113,14 +121,35 @@ defmodule Conns.Pool do
   some of the `Conn.methods/1`;
   4. recreate connection with given args if it failed to make steps 2 or 3.
 
-  This behaviour is easy to tune. All you need is to provide specs with
-  different triggers and actions. `Conns.Pool` has a builtin trigger&actions
-  system. For example, default behaviour is encoded as:
+  To do so pool uses `EventAction` mechanism. It handles events and executes
+  corresponding actions. Behaviours could be easilly tuned. All you need is
+  to provide specs with different triggers and actions. For example, we can
+  write delete if could not default
+  behaviour is encoded as:
 
-      [__any__: [became(:invalid, do: :fix),
-                 unable(:fix, do: :recreate),
-                 became(:closed, do: :delete)],
-       __all__:  became(:invalid, do: :fix)]
+      [ fn {:state_changed, {id, conn}, method, {from, :invalid}} ->
+          Conns.Pool.fix( )
+        end,
+
+        fn {:unable, :fix, {id, conn}, method} ->
+          Conns.Pool.fix( )
+        end,
+
+        fn {:unable, :fix, {id, conn}, method} ->
+          Conns.Pool.fix( )
+        end,
+
+        fn {:conn_closed, {id, conn}} ->
+          Conns.Pool.drop( )
+        end,
+
+        fn {:conn_invalidated, {id, conn}} ->
+          case Conn.fix( conn) do
+            {:ok, conn} -> 
+            {:error, error, conn} -> 
+            {:error, error} -> 
+          end
+        end]
 
   The tuple element of the keyword has key `:__any__` (or `:_`) that means
   "any of the connection `Conn.methods/1`". As a value, list of triggers&actions
@@ -164,64 +193,64 @@ defmodule Conns.Pool do
   * `tagged( new_tag, do block)`;
   * `untagged( deleted_tag, do block)`;
   * `unable( mark, do block)`.
-
-  Sagas-transactions would be added in next version of library.
-
-  ## Unsafe operations
-
-  Concurrent use of copies of the same connection is unsafe.
-  But if you are confident, it's easy to bypass:
-
-      conn_id = 1
-      {:ok, conn, _} = Conns.Pool.take( conn_id)
-      Conns.Pool.put( conn, id: conn_id)
-      # use conn while it's still available
-      # for others by the same id
   """
 
   @type  id :: nil | atom | String.t | non_neg_integer
   @type  method_s :: Conn.method | [Conn.method] | :_
+  @type  name :: term | {:global, term} | {:via, atom, term}
 
+  @type  eventAction_spec :: {term, term}
 
-  @name System.get_env("POOL_NAME") || :"Conns.Pool"
+  @name        System.get_env("POOL_NAME") || :"Conns.Pool"
+  @name_schema System.get_env("POOL_NAME_SCHEMA") || &Conns.Pool.name_schema/2
+
+  def name_schema( name, id), do: {name, id}
 
 
   alias Conns.Pool.Server
 
+
   @doc """
   Pool name for given id. This function helps when starting
-  a lot of similar pools. It generates pool names based
-  on id given.
+  a lot of similar pools. It generates pool names based on
+  id given.
 
-  Default name `{:Conns.Pool, pool_id}` can be changed.
-  Just add:
+  By default, `name( 123)` will give us `{:Conns.Pool, 123}`.
+  This could be changed. Just add:
 
       config :conn_pool,
         POOL_NAME: :OtherName # → {:OtherName, pool_id}
-
       # or
-
-      config :conn_pool,
         POOL_NAME: {:global, :OtherName} # → {:global, {:OtherName, pool_id}}
-
       # or
+        POOL_NAME: {:via, Module, :OtherName} # → {:via, Module, {:OtherName, pool_id}}
+
+      # or even
+
+      defmodule Different do
+        def name_schema name, pool_id, do: :"\#{name}\#{pool_id}"
+      end
 
       config :conn_pool,
-        POOL_NAME: {:via, Module, :OtherName} # → {:via, Module, {:OtherName, pool_id}}
+        POOL_NAME: {:via, Module, :OtherName}
+        POOL_NAME_SCHEMA: &Different.name_schema/2
+        # → {:via, Module, :"OtherName\#{pool_id}"}
 
   to your config file. Also, see [article](https://hexdocs.pm/elixir/GenServer.html#module-name-registration).
 
   Mostly, it used as:
 
-      start_link( name: name( 123)) # by default it starts pool {:Conns.Pool, 123}
+      start_link( name: name( 123)) # by default it starts pool named {:Conns.Pool, 123}
+      # or:
+      start_link( name: name( :OtherName, 123)) # by default it starts pool named {:OtherName, 123}
 
       take( conn_id, pool: name( 123)) # take/2 conn with given id from pool {:Conns.Pool, 123}
   """
-  def name( pool_id, gen \\ fn term, id -> {term, id} end) do
-    case @name do
-      {:global, term} -> {:global, gen.( term, pool_id)}
-      {:via, module, term} -> {:via, module, gen.( term, pool_id)}
-      term -> gen.( term, pool_id)
+  def name( name_base \\ @name, pool_id) do
+    case name_base do
+      {:global, term} -> {:global, @name_schema.( term, pool_id)}
+      {:via, module, term} -> {:via, module, @name_schema.( term, pool_id)}
+      term -> @name_schema.( term, pool_id)
     end
   end
 
@@ -230,30 +259,54 @@ defmodule Conns.Pool do
   Starts pool as a linked named process.
 
   By default pool is registered locally, under the
-  name `:"Conns.Pool"`. In case we would like to start
-  many similar pools, `:name` param can be given:
+  name `:"Conns.Pool"`. This can be changed, add:
 
-      start_link( name: {:local, :OtherName})
+      config :conn_pool,
+        POOL_NAME: :OtherName
+        # or
+        POOL_NAME: {:global, :OtherName}
+        # or
+        POOL_NAME: {:via, Module, :OtherName}
 
-     or:
+  to your config file or provide `:name` option:
 
-      start_link( name: name( 123)) # by default starts local pool {:Conns.Pool, 123}
-
-     or:
-
+      start_link( name: :OtherName)
+      # or
       start_link( name: {:global, :OtherName})
+      # or
+      start_link( name: {:via, Module, :OtherName})
 
-     or:
+  If you want to start many similar pools, for example
+  in multiuser app, use `name/2`.
 
-      start_link( name: {:via, :global, :OtherName})
+  ## Specs
+  Pool treats connections as childs, so every conn has
+  `Conn.child_spec/1` function that returns what action
+  should be taken for every significant event (such as
+  conn close or invalidate). That represents health
+  care mechanism.
 
-  see `name/1` docs.
+  Pool uses `EventAction`. See [this](#module-health-care)
   """
-  @spec start_link( [resources: [Conn.resource], pool: id]) :: GenServer.on_start
-  def start_link( init_args \\ [resources: [], pool: nil, specs: []]) do
+  @spec start_link( [resources: [Conn.resource],
+                     specs: [eventAction_spec],
+                     name: name])
+        :: GenServer.on_start
+
+  def start_link( init_args \\ [resources: [], specs: [], name: @name]) do
+    init_args = init_args |> Keyword.put_new(:name, @name)
+                          |> Keyword.put_new(:resources, [])
+                          |> Keyword.put_new(:specs, [])
+
     __MODULE__.Server.start_link( init_args)
   end
 
+
+  # Setup defaults for :pool and :emit args
+  defp with_defaults( opts) do
+     Keyword.put_new( opts, :pool, @name)
+  |> Keyword.put_new(       :emit, true)
+  end
 
   @doc """
   Take connection from pool. You can always give it back with
@@ -263,8 +316,7 @@ defmodule Conns.Pool do
 
   Some of the conn methods can became `:invalid`. `Conn.state/2`
   == `:invalid` means that you are not capable to use selected
-  method via `Conn.call/3`. You can try to `Conn.fix/3` broken
-  method or pool [can do this for you](#module-child-spec).
+  method via `Conn.call/3`. Pool will [try to fix it for you](#module-health-care) on `put/2`.
 
   You can still take connection if there are at least one method
   that is `:ready`. Pool will return you that connection and
@@ -280,42 +332,77 @@ defmodule Conns.Pool do
   * `{:error, :notfound}` if pool does not manage conn with such id.
   * `{:error, {:timeout, μs}}` — timeout in *micro*seconds (=10^-6 s)
   means that you should wait `μs` μs before connection can be taken.
-  """
-  @spec take( Conn.id, [pool: id]) :: {:ok, Conn.t, []}
-                                    | {:ok, Conn.t, [{Conn.method, timeout | :invalid}]}
-                                    | {:error, :notfound
-                                             | :invalid
-                                             | :closed
-                                             | {:timeout, timeout}}
-  def take( id, opts \\ [pool: nil]) do
-    opts = opts.put_new( opts, :pool, nil)
 
-    Server.name( opts[:pool])
-    |> GenServer.call( {:take, id})
+  ## Events
+
+  On success event `{:take, {:ok, {id, conn}, warnings}}` is
+  `EventAction.emit/2`ed. On fail — `{:take, {:error, explained}}`.
+  """
+  @spec take( Conn.id, [emit: boolean, pool: name])
+        :: {:ok, Conn.t, []}
+         | {:ok, Conn.t, [{Conn.method, timeout | :invalid}]}
+         | {:error, :notfound
+                  | :invalid
+                  | :closed
+                  | {:timeout, timeout}}
+
+  def take( id, opts \\ [emit: true, pool: @name]) do
+    opts = opts |> with_defaults()
+    result = GenServer.call( opts[:pool], {:take, id})
+
+    if opts[:emit] do
+      emit_take_event( id, result, opts[:pool])
+    else
+      result
+    end
   end
 
+  # Emit take event
+  defp emit_take_event( conn_id, result, pool) do
+    spawn( fn ->
+      EventAction.emit(
+        pool,
+        case result do
+          {:ok, conn} -> {:take, {:ok, {conn_id, conn}, []}}
+          {:ok, conn, warnings} -> {:take, {:ok, {conn_id, conn}, warnings}}
+          error -> {:take, error}
+        end)
+    end)
+  end
 
   @doc """
-  Grad connection from pool. If connection with such id
+  Grab connection from pool. If connection with such id
   managed by pool — it will be returned with timeout value
   in *micro*seconds (normally zero).
 
   Use `Conn.state/2` to knew the actual state of returned
   connection.
-  """
-  @spec grab( Conn.id, [pool: id]) :: {:ok, Conn.t, {:timeout, timeout}}
-                                    | {:error, :notfound}
-  def grab( id, opts \\ [pool: nil]) do
-    opts = opts.put_new( opts, :pool, nil)
 
-    Server.name( opts[:pool])
-    |> GenServer.call( {:grab, id})
+  ## Events
+
+  On success event `{:take, {:ok, {id, conn}, warnings}}` is
+  `EventAction.emit/2`ed. On fail — `{:take, {:error, explained}}`.
+  """
+  @spec grab( Conn.id, [emit: boolean, pool: name])
+        :: {:ok, Conn.t, [{Conn.method | :_, timeout | :invalid}]}
+         | {:error, :notfound}
+         | {:error, :closed}
+
+  def grab( id, opts \\ [emit: true, pool: @name]) do
+    opts = opts |> with_defaults()
+    result = GenServer.call( opts[:pool], {:grab, id})
+
+    if opts[:emit] do
+      emit_take_event( id, result, opts[:pool])
+    else
+      result
+    end
   end
 
 
   @doc """
-  Take connection to use it with specified method(s) of
-  interaction. You can always give connection back with
+  Take connection with aim to use it with specified method(s)
+  of interaction. You can always give connection back with
   `put/2`.
 
   ## Errors
@@ -328,27 +415,38 @@ defmodule Conns.Pool do
   * `{:error, {:timeout, μs}}` — timeout in *micro*seconds (=10^-6 s)
   means that you should wait `μs` μs before connection can be *used
   for all the given methods of interactions*.
-  """
-  @spec take_for( Conn.id, method_s, id) :: {:ok, Conn.t}
-                                          | {:error, :notfound
-                                                   | :invalid
-                                                   | :closed
-                                                   | {:timeout, timeout}}
-  def take_for( id, method_s, opts \\ [pool: nil]) do
-    opts = opts.put_new( opts, :pool, nil)
 
-    Server.name( opts[:pool])
-    |> GenServer.call( {:take, id, method_s})
+  ## Events
+
+  On success event `{:take, {:ok, {id, conn}, warnings}}` is
+  `EventAction.emit/2`ed. On fail — `{:take, {:error, explained}}`.
+  """
+  @spec take_for( Conn.id, method_s, [emit: boolean, pool: name])
+        :: {:ok, Conn.t}
+         | {:error, :notfound
+                  | :invalid
+                  | :closed
+                  | {:timeout, timeout}}
+
+  def take_for( id, method_s, opts \\ [emit: true, pool: @name]) do
+    opts = opts |> with_defaults()
+    result = GenServer.call( opts[:pool], {:take_for, id, List.wrap( method_s)})
+
+    if opts[:emit] do
+      emit_take_event( id, result, opts[:pool])
+    else
+      result
+    end
   end
 
 
   @doc """
   Put connection to pool.
 
-  Pool respects order. As ids timestamps used. So on any
-  `*_first` call conns that injected earlier will be returned.
+  Pool respects order. Timestamps used as ids. So on any
+  `*_one` call conns that injected earlier will be returned.
 
-  In a highly unliked event when `:id` param is given and
+  On a highly unlikely event, when `:id` param is given and
   there is already connection exists with such id runtime
   error would be raised.
 
@@ -361,12 +459,29 @@ defmodule Conns.Pool do
   in any way during timeout period. Timeout is encoded in *micro*seconds
   (=10^-6 sec).
   """
-  @spec put( Conn.t, [spec: Conn.spec, pool: id, id: Conn.id]) :: Conn.id
-  def put( conn, opts \\ [spec: [], pool: nil, timeout: 0]) do
-    opts = opts.put_new( opts, :pool, nil)
+  @spec put( Conn.t, [timeout: timeout,
+                      spec: Conn.spec,
+                      id: Conn.id,
+                      emit: true, pool: id])
+        :: Conn.id
 
-    Server.name( opts[:pool])
-    |> GenServer.call( {:put, conn, Keyword.delete( opts, :pool)})
+  def put( conn, opts \\ [timeout: 0, spec: [], emit: true, pool: nil]) do
+    opts = opts |> with_defaults()
+                |> Keyword.put_new(:timeout, 0)
+                |> Keyword.put_new(:spec, Conn.child_spec( conn))
+
+    {:ok, id} = GenServer.call( opts[:pool],
+                                {:put, conn, opts[:timeout], opts[:id]})
+
+    if opts[:emit] do
+      spawn( fn ->
+        EventAction.emit(
+          opts[:pool],
+          {:put, {:ok, {id, conn}, opts[:timeout], opts[:spec]}})
+      end)
+    else
+      id
+    end
   end
 
 

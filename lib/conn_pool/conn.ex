@@ -55,6 +55,23 @@ defmodule Conn.Defaults do
 
 
   @doc """
+  Connection warnings is a list with pairs
+  `{method, timeout | :invalid | :closed}`. See `Conn.state/2`
+  function.
+
+  ## Examples
+
+      Conn.warnings( conn) = [ask: :invalid, say: 65536]
+  """
+  @spec warnings( Conn.t) :: [{Conn.method, timeout | :invalid | :closed}]
+  def warnings( conn) do
+     Conn.methods( conn)
+  |> Enum.map( fn method -> {method, Conn.state( conn)} end)
+  |> Enum.filter( fn {_,state} -> state != :ready end)
+  end
+
+
+  @doc """
   Authenticate connection. Easy to use version of `Conn.set_auth/3`
   function. Returns `{:ok, conn}` or `{:error, conn}`, where `conn`
   is an updated version of connection.
@@ -361,6 +378,7 @@ defprotocol Conn do
 
 
   defdelegate fix( conn, init_args), to: Conn.Defaults
+  defdelegate warnings( conn), to: Conn.Defaults
   defdelegate invalid?( conn), to: Conn.Defaults
   defdelegate healthy?( conn), to: Conn.Defaults
   defdelegate authenticate( conn, method \\ :__all__, auth), to: Conn.Defaults

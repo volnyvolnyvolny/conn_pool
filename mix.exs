@@ -22,6 +22,7 @@ defmodule ConnPool.Mixfile do
   # Run "mix help deps" to learn about dependencies.
   defp deps do
     [{:earmark, "~> 1.1", only: :dev},
+     {:event_action, git: "git@gitlab.com:flomop/event_action.git", tag: "v0.01"},
      {:ex_doc, "~> 0.16", only: :dev}]
   end
 end
