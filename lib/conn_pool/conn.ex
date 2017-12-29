@@ -66,7 +66,7 @@ defmodule Conn.Defaults do
   @spec warnings( Conn.t) :: [{Conn.method, timeout | :invalid | :closed}]
   def warnings( conn) do
      Conn.methods( conn)
-  |> Enum.map( fn method -> {method, Conn.state( conn)} end)
+  |> Enum.map( fn method -> {method, Conn.state( conn, method)} end)
   |> Enum.filter( fn {_,state} -> state != :ready end)
   end
 
@@ -190,6 +190,17 @@ defprotocol Conn do
                               | {:onerror, action}}]
 
 
+  defdelegate fix( conn, init_args), to: Conn.Defaults
+  defdelegate warnings( conn), to: Conn.Defaults
+  defdelegate invalid?( conn), to: Conn.Defaults
+  defdelegate healthy?( conn), to: Conn.Defaults
+  defdelegate authenticate( conn, method \\ :__all__, auth), to: Conn.Defaults
+
+
+  @spec child_spec( Conn.t) :: spec
+  def child_spec( conn)
+
+
   @doc """
   Init connection. Options could be provided. For example,
   as init argument `Conns.Pool` provides at least `[source: source]`.
@@ -205,7 +216,8 @@ defprotocol Conn do
 
   @doc """
   Try to repair given method of conn interaction.
-  As a the argument provide options used in `init/2`.
+  Options used in `init/2` should be provided as
+  the last argument.
 
   Use `Conn.Defaults` to define `fix/2` that just
   calls `init/2` with provided arguments.
@@ -375,13 +387,6 @@ defprotocol Conn do
                               | {:error, {{:notsupported, method, data}, data}}
                               | {:error, :notsupported | error}
   def parse(_conn, data)
-
-
-  defdelegate fix( conn, init_args), to: Conn.Defaults
-  defdelegate warnings( conn), to: Conn.Defaults
-  defdelegate invalid?( conn), to: Conn.Defaults
-  defdelegate healthy?( conn), to: Conn.Defaults
-  defdelegate authenticate( conn, method \\ :__all__, auth), to: Conn.Defaults
 
 
   @doc """

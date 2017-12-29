@@ -207,9 +207,6 @@ defmodule Conns.Pool do
   def name_schema( name, id), do: {name, id}
 
 
-  alias Conns.Pool.Server
-
-
   @doc """
   Pool name for given id. This function helps when starting
   a lot of similar pools. It generates pool names based on
@@ -308,6 +305,12 @@ defmodule Conns.Pool do
   |> Keyword.put_new(       :emit, true)
   end
 
+  # EventAction.emit
+  defp emit( pool, conn_id, event) do
+    spawn( fn -> EventAction.emit([pool, conn_id], event) end)
+  end
+
+
   @doc """
   Take connection from pool. You can always give it back with
   `put/2`.
@@ -348,27 +351,30 @@ defmodule Conns.Pool do
 
   def take( id, opts \\ [emit: true, pool: @name]) do
     opts = opts |> with_defaults()
-    result = GenServer.call( opts[:pool], {:take, id})
+    pool = opts[:pool]
+
+    #grab:)
+    result = GenServer.call( pool, {:grab, id})
+    # interpret grab results:
+    result = with {:ok, conn, warnings} <- result,
+                  nil <- warnings[:_] do
+
+               {:ok, conn, warnings}
+             else
+               {:error,_explained}=err -> err
+
+               expl -> # on error — return connection
+                 GenServer.call( pool, {:put, if expl == :invalid do 0 else expl end, id})
+                 {:error, expl}
+             end
 
     if opts[:emit] do
-      emit_take_event( id, result, opts[:pool])
-    else
-      result
+      emit( pool, id, {:take, result})
     end
+
+    result
   end
 
-  # Emit take event
-  defp emit_take_event( conn_id, result, pool) do
-    spawn( fn ->
-      EventAction.emit(
-        pool,
-        case result do
-          {:ok, conn} -> {:take, {:ok, {conn_id, conn}, []}}
-          {:ok, conn, warnings} -> {:take, {:ok, {conn_id, conn}, warnings}}
-          error -> {:take, error}
-        end)
-    end)
-  end
 
   @doc """
   Grab connection from pool. If connection with such id
@@ -385,18 +391,17 @@ defmodule Conns.Pool do
   """
   @spec grab( Conn.id, [emit: boolean, pool: name])
         :: {:ok, Conn.t, [{Conn.method | :_, timeout | :invalid}]}
-         | {:error, :notfound}
-         | {:error, :closed}
+         | {:error, :notfound | :closed}
 
   def grab( id, opts \\ [emit: true, pool: @name]) do
     opts = opts |> with_defaults()
     result = GenServer.call( opts[:pool], {:grab, id})
 
     if opts[:emit] do
-      emit_take_event( id, result, opts[:pool])
-    else
-      result
+      emit( opts[:pool], id, {:take, result})
     end
+
+    result
   end
 
 
@@ -430,13 +435,31 @@ defmodule Conns.Pool do
 
   def take_for( id, method_s, opts \\ [emit: true, pool: @name]) do
     opts = opts |> with_defaults()
-    result = GenServer.call( opts[:pool], {:take_for, id, List.wrap( method_s)})
+    result = take( id, opts)
+    methods = List.wrap method_s
+
+    # interpret grab results:
+    result = with {:ok, conn, warnings} <- result,
+                  [] <- (Enum.map( methods, & warnings[&1])
+                      |> Enum.reject(& &1)) do
+
+               {:ok, conn}
+             else
+               {:error,_explained}=err -> err
+
+               expls ->
+                 {:error, if :invalid in expls do
+                             :invalid
+                          else
+                            {:timeout, Enum.max( expls)}
+                          end}
+             end
 
     if opts[:emit] do
-      emit_take_event( id, result, opts[:pool])
-    else
-      result
+      emit( opts[:pool], id, {:take, result})
     end
+
+    result
   end
 
 
