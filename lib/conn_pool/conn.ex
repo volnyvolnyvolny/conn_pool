@@ -2,8 +2,9 @@ defmodule Conn.Defaults do
   @moduledoc """
   Default implementations of optional callbacks of `Conn` protocol:
   `Conn.add_tag/2`, `Conn.delete_tag/2`, `Conn.tags/1`, `Conn.undo/3`,
-  `Conn.set_auth/3`. All of them are overridable, and by default
-  return `{:error, :notsupported}` or `:notsupported`.
+  `Conn.set_auth/3`, `Conn.close/1`, `Conn.child_spec/1` and `Conn.fix/3`.
+  All of them are overridable, and by default return `{:error, :notsupported}` or
+  `:notsupported`.
 
   Use it like this:
 
@@ -21,6 +22,7 @@ defmodule Conn.Defaults do
         def set_auth(_, _, _), do: …
         def undo(_, _, _), do: …
         def close(_), do: …
+        def child_spec(_), do: …
 
         def fix(_,_,_), do: …
 
@@ -124,12 +126,15 @@ defmodule Conn.Defaults do
 
       def close(_conn), do: {:error, :notsupported}
 
+      def parse(_conn,_data), do: {:error, :notsupported}
+
       def undo(_conn,_method,_specs), do: {:error, :notsupported}
 
       def set_auth(_conn, _method \\ :__all__, _auth), do: {:error, :notsupported}
 
       defoverridable [child_spec: 1, init: 2, fix: 3, close: 1,
                       add_tag: 2, delete_tag: 2, tags: 2,
+                      parse: 2,
                       undo: 3,
                       set_auth: 3]
     end
@@ -139,28 +144,28 @@ end
 
 defprotocol Conn do
   @moduledoc """
-  Protocol for connections that are managable by `Conns.Pool`.
-  It's a high level abstraction. Underlying implementation can
-  use any transport mechanism to connect with remote or VM-local
-  resources: `Agent`s, `GenServer`s and so on as different APIs and
-  any, of course, http-resources.
+  `Conns.Pool` managable connections. It's a high level
+  abstraction. Implementations can use any transport to connect to
+  any remote or VM-local resources, such as `Agent`s, `GenServer`s,
+  different APIs and, of course, any http-resources.
 
   # Callbacks
 
-    * `resource/1` — resource for corresponding connection. *It's
-    not forbidden to return list of resources*;
+    * `resource/1` — resource for corresponding connection. *You can
+    also return list of resources*;
     * `methods/1` — methods supported in connection calls;
     * `state/2` — state of connection in respect of method
-      (`:ready` for interaction; `:invalid` and needs to be fixed;
-      have local timeout; was `:closed`);
-    * `call/3` — interact using given connection and specs.
+      (`:ready` for interaction; `:invalid` — need to `Conn.fix/3` it
+      before use; has local timeout; was `:closed`);
+    * `call/3` — interact via selected method.
 
   ## Optional callbacks
 
     * `init/2` — initialize connection with given arguments;
     * `fix/3` — try to fix connection that returns `state/2` == `:invalid`
-       for specific method;
+       for some method;
 
+    * `child_spec/1` — child spec by analogy with `Supervisor`s childs;
     * `parse/2` — parse data in respect of connection context;
 
     * `tags/1` — tags associated with connection;
@@ -168,6 +173,8 @@ defprotocol Conn do
     * `delete_tag/2` — deassociate tag from connection;
 
     * `set_auth/3` — authenticate connection;
+
+    * `close/1` — close connection;
 
     * `undo/3` — support Sagas-transactions.
   """
@@ -197,6 +204,12 @@ defprotocol Conn do
   defdelegate authenticate( conn, method \\ :__all__, auth), to: Conn.Defaults
 
 
+  @doc """
+  Child spec (by analogy with `Supervisor` childs).
+
+  Module `Conn.Defaults` has default implementation of `child_spec/1`.
+  It returns: :normal_strategy.
+  """
   @spec child_spec( Conn.t) :: spec
   def child_spec( conn)
 
@@ -204,6 +217,10 @@ defprotocol Conn do
   @doc """
   Init connection. Options could be provided. For example,
   as init argument `Conns.Pool` provides at least `[source: source]`.
+
+  Using this function you can make clean copy of connection:
+
+      clean_conn = xConn.init( conn)
 
   Module `Conn.Defaults` has default implementation of `init/2` that
   just returns given conn ignoring args. *Probably you would want
@@ -241,14 +258,14 @@ defprotocol Conn do
 
       # choose and take conn from pool that is capable of handle
       # interaction with both :say and :listen methods
-      {:ok, conn} = Pool.take_first( resource, [:say, :listen])
+      {:ok, conn} = Pool.take_one( resource, [:say, :listen])
       {:ok, conn} = Conn.call( conn, :say, what: "Hi!", name: "Louie")
       {:ok, "Hi Louie!"} = Conn.call( conn, :listen)
       {:ok, _id} = Pool.put( conn) #returns connection back to pool
 
       Or:
 
-      {:ok, conn} = Pool.take_first( resource, [:say, :listen])
+      {:ok, conn} = Pool.take_one( resource, [:say, :listen])
       {:ok, {conn, dialog_id}} = Conn.call( conn, :say, what: "Hi!", name: "Louie", new_dialog: true)
       {:ok, {conn, "Hi Louie!"}} = Conn.call( conn, :listen, dialog_id: dialog_id)
       {:ok, conn} = Conn.call( conn, :say, what: "How are U?", dialog_id: dialog_id)
@@ -281,7 +298,7 @@ defprotocol Conn do
 
       resource = %JSON_API{url: "http://example.com/api/v1"}
 
-      {:ok, conn} = Pool.take_first( resource, [:say, :listen])
+      {:ok, conn} = Pool.take_one( resource, [:say, :listen])
       {:ok, conn} = Conn.call( conn, :say, what: "Hi!", name: "Louie")
 
       :ok = Conn.undo( conn, :say, what: "Hi!", name: "Louie")
@@ -309,7 +326,7 @@ defprotocol Conn do
   ## Examples
 
       resource = %JSON_API{url: "http://example.com/api/v1"}
-      {:ok, conn} = Pool.take_first( resource, :info)
+      {:ok, conn} = Pool.take_one( resource, :info)
 
       # now:
       Conn.resource( conn).url == "http://example.com/api/v1"
@@ -360,7 +377,7 @@ defprotocol Conn do
   ## Examples
 
       resource = %JSON_API{url: "http://example.com/api/v1"}
-      {:ok, conn} = Pool.take_first( resource, :info)
+      {:ok, conn} = Pool.take_one( resource, :info)
 
       # now:
       :info in Conn.methods( conn)
@@ -376,16 +393,18 @@ defprotocol Conn do
   On parse error returns `{{:parse, data piece with error}, rest of data}`
   or `{{:notsupported, method, data piece with error}, rest of data}` if
   used method is not supported. Finally, it can return arbitrary
-  error with `{:error, error}`.
+  error with `{:error, error}`. Error `{:error, :needmoredata}` mean
+  that given amount of data is not enough for parsing.
 
   Use `Conn.Defaults` to define function `parse/2` to make this function
   always return `{:error, :notsupported}`.
   """
-  @spec parse( Conn.t, data) :: {:ok, {{method, data | auth
-                                              | {auth, data}}, data}}
+  @spec parse( Conn.t, data) :: {:ok, {method, data | {:auth, auth}
+                                                    | {{:auth, auth}, data}, data}}
                               | {:error, {{:parse, data}, data}}
                               | {:error, {{:notsupported, method, data}, data}}
                               | {:error, :notsupported | error}
+                              | {:error, :needmoredata}
   def parse(_conn, data)
 
 
@@ -441,8 +460,8 @@ defprotocol Conn do
 
   @doc """
   Add tag to given connection so later it can be filtered
-  using `tags/1` with `Conns.Pool.lookup/4`, `Conns.Pool.take_first/4`
-  and any other pool's function that supports filter argument.
+  with `tags/1` and any pool's function that supports specific
+  filter argument.
 
   Use `Conn.Defaults` to define function `add_tag/2`, `delete_tag/2`
   and `tags/1` to return `:notsupported`.

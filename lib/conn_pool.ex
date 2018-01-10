@@ -1,6 +1,6 @@
 defmodule Conns.Pool do
   @moduledoc """
-  `Conn`s manager. To start single or multiple pools use `start_link/1`.
+  `Conn`s manager. To start one or more pools use `start_link/1`.
   Now:
 
   **Step 1. Provide pool with connections**
@@ -35,7 +35,7 @@ defmodule Conns.Pool do
 
   Cast is a call & forget and returns `:ok` immediatly on choose success.
 
-  **Step 2,3,4b. Choose and take and use and return connection**
+  **Step 2,3,4b. Choose → take → use and return connection**
 
   Use `Conns.Pool.choose_and_take/4` to take connection that is capable
   to interact via given methods:
