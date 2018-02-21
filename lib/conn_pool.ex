@@ -193,6 +193,14 @@ defmodule Conns.Pool do
   * `tagged( new_tag, do block)`;
   * `untagged( deleted_tag, do block)`;
   * `unable( mark, do block)`.
+
+
+  System has two timeouts: (1) refresh rate that prevents from using connection
+  too frequently; (2) pool timeout that can be setted by user, for example, in
+  case of error happend. Pool will never give you access to invalid connection
+  (see `invalid?/1`), connection with nonzero timeout and connection in state
+  `:closed`. To bypass (access to invalid or timeout conn) use
+  `Conns.Pool.lookup/4` and `Conns.Pool.grab/2`.
   """
 
   @type  id :: nil | atom | String.t | non_neg_integer
