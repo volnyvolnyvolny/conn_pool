@@ -648,4 +648,36 @@ defmodule Conns.Pool do
   #     ret
   #   end
   # end
+
+  @doc """
+  Add tag to given connection so later it can be filtered
+  using `tags/1` with `Conns.Pool.lookup/4`, `Conns.Pool.take_first/4`
+  and any other pool's function that supports filter argument.
+
+  Use `Conn.Defaults` to define function `add_tag/2`, `delete_tag/2`
+  and `tags/1` to return `:notsupported`.
+  """
+  @spec add_tag( Conn.t, tag) :: Conn.t | :notsupported
+  def add_tag( conn, tag)
+
+
+  @doc """
+  Delete tag from given connection.
+
+  Use `Conn.Defaults` to define function `add_tag/2`, `delete_tag/2`
+  and `tags/1` to return `:notsupported`.
+  """
+  @spec delete_tag( Conn.t, tag) :: Conn.t | :notsupported
+  def delete_tag( conn, tag)
+
+
+  @doc """
+  All tags associated with given connection. Tags can be added via
+  `Conn.add_tag/2` function and deleted via `Conn.delete_tag/2`.
+
+  Use `Conn.Defaults` to define function `add_tag/2`, `delete_tag/2`
+  and `tags/1` to return `:notsupported`.
+  """
+  @spec tags( Conn.t) :: [tag] | :notsupported
+  def tags( conn)
 end

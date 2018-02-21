@@ -6,12 +6,12 @@ defmodule Conns.Pool.Server do
   """
 
 #   import Conns.Pool.ETS
-#   import NaiveDateTime
+  import NaiveDateTime
 
 # #   import Enum, only: [map: 2]
 
   # Generate uniq id
-  defp gen_id({table, max_id}) do
+  defp gen_id( max_id) do
     if :os.system_time(:microsecond) < max_id do
       raise "Error! System time changed! Id ordering cannot be guaranted!"
     else
@@ -47,27 +47,40 @@ defmodule Conns.Pool.Server do
   end
 
 
-  def handle_call( {:put, conn, timeout, id}, _from, {table,_}) do
-    id = id || gen_id( table)
-    :ets.insert( table, {id, timeout, conn})
+  def handle_call( {:put, conn, timeout, id}, _from, {table, max_id}) do
+    id = id || gen_id( max_id)
 
-    {:reply, id, {table, id}}
+    next_try = if timeout > 0 do
+                 {:next_try, add( utc_now(), timeout, :microseconds)}
+               end
+
+    :ets.insert( table, {id, next_try, conn})
+
+    {:reply, id, {table, max_id}}
   end
 
-  def handle_call( {:grab, id}, _from, {table,id}) do
-    case :ets.lookup( table, id) do
-      [{^id, timeout, conn}] ->
-        warnings = Conn.warnings( conn)
+  def handle_call( {:grab, id}, _from, {table, max_id}) do
+    reply = with  [{^id, nil, conn}] <- :ets.lookup( table, id),
+                  warnings = Conn.warnings( conn),
+                  false <- Enum.any?( warnings, fn {_,state} -> state == :closed end) do
 
-        if Enum.any?( warnings, fn {_,state} -> state == :closed end) do
-          {:reply, {:error, :closed}, {table, id}}
-        else
-          {:reply, {:ok, conn, warnings}, {table, id}}
-        end
+              {:ok, conn, warnings}
+            else
+              [] ->
+                 {:error, :notfound}
 
-      [] ->
-        {:reply, {:error, :notfound}, {table, id}}
-    end
+              [{^id, {:next_try, next_try}, conn}] ->
+
+                 if (compare( next_try, utc_now()) in [:lt, :eq]) do
+                   conn
+                 else
+                   {:error, {:timeout, diff( next_try, utc_now(), :microseconds)}}
+                 end
+
+              _ -> {:error, :closed}
+            end
+
+    {:reply, reply, {table, max_id}}
   end
 
 # #   # Given spec match tuple?
@@ -93,8 +106,6 @@ defmodule Conns.Pool.Server do
 # #   end
 
 
-
-# #   #———————————————————————————————————————————————————————————
 
 #   def handle_call( {:get, id}, _from, table) do
 #     {:reply,
