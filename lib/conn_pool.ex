@@ -1,4 +1,6 @@
 defmodule Conns.Pool do
+  use AgentMap # defines child_spec
+
   @moduledoc """
   `Conn`s manager. To start single or multiple pools use `start_link/1`.
   Now:
@@ -91,9 +93,7 @@ defmodule Conns.Pool do
   Be aware, that every function in `Pool` supports `pool: id` param.
   This way different pools can be used:
 
-      import Conns.Pool, only: [name: 2]
-
-      Conns.Pool.put( conn, pool: name( 1)) #add conn to pool #1
+      Conns.Pool.put( pool, conn, pool: name( 1)) #add conn to pool #1
       Conns.Pool.put( conn, pool: name( 2)) #add conn to pool #2
 
   Also, you can use copies of the same connection concurently:
@@ -107,8 +107,10 @@ defmodule Conns.Pool do
   This is **not recommended**. Use it only if copies of conns don't
   share state!
 
-  ## Transactions
-  Sagas-transactions would be added in the next version of library.
+  ## Name registration
+
+  An `Conn.Pool` is bound to the same name registration rules as `GenServer`s.
+  Read more about it in the `GenServer` docs.
 
   ## Health care
 
@@ -209,83 +211,31 @@ defmodule Conns.Pool do
 
   @type  eventAction_spec :: {term, term}
 
-  @name        System.get_env("POOL_NAME") || :"Conns.Pool"
-  @name_schema System.get_env("POOL_NAME_SCHEMA") || &Conns.Pool.name_schema/2
+  # @name        System.get_env("POOL_NAME") || :"Conns.Pool"
+  # @name_schema System.get_env("POOL_NAME_SCHEMA") || &Conns.Pool.name_schema/2
 
-  def name_schema( name, id), do: {name, id}
-
-
-  alias Conns.Pool.Server
+  #  def name_schema( name, id), do: {name, id}
 
 
-  @doc """
-  Pool name for given id. This function helps when starting
-  a lot of similar pools. It generates pool names based on
-  id given.
+  @enforce_keys [:resources, :conns, :pid]
+  defstruct :resources, :conns, :pid
 
-  By default, `name( 123)` will give us `{:Conns.Pool, 123}`.
-  This could be changed. Just add:
 
-      config :conn_pool,
-        POOL_NAME: :OtherName # → {:OtherName, pool_id}
-      # or
-        POOL_NAME: {:global, :OtherName} # → {:global, {:OtherName, pool_id}}
-      # or
-        POOL_NAME: {:via, Module, :OtherName} # → {:via, Module, {:OtherName, pool_id}}
+  @spec start_link([GenServer.option]) :: GenServer.on_start
+  def start_link( opts) do
+    opts = Keyword.put_new opts, :resources, []
+    resources = AgentMap.start_link 
 
-      # or even
-
-      defmodule Different do
-        def name_schema name, pool_id, do: :"\#{name}\#{pool_id}"
-      end
-
-      config :conn_pool,
-        POOL_NAME: {:via, Module, :OtherName}
-        POOL_NAME_SCHEMA: &Different.name_schema/2
-        # → {:via, Module, :"OtherName\#{pool_id}"}
-
-  to your config file. Also, see [article](https://hexdocs.pm/elixir/GenServer.html#module-name-registration).
-
-  Mostly, it used as:
-
-      start_link( name: name( 123)) # by default it starts pool named {:Conns.Pool, 123}
-      # or:
-      start_link( name: name( :OtherName, 123)) # by default it starts pool named {:OtherName, 123}
-
-      take( conn_id, pool: name( 123)) # take/2 conn with given id from pool {:Conns.Pool, 123}
-  """
-  def name( name_base \\ @name, pool_id) do
-    case name_base do
-      {:global, term} -> {:global, @name_schema.( term, pool_id)}
-      {:via, module, term} -> {:via, module, @name_schema.( term, pool_id)}
-      term -> @name_schema.( term, pool_id)
-    end
+    {funs, opts} = separate funs_and_opts
+    timeout = opts[:timeout] || 5000
+    opts = Keyword.put(opts, :timeout, 5000:infinity) # turn off global timeout
+    GenServer.start_link Server, {funs, timeout}, opts
   end
 
 
+
   @doc """
-  Starts pool as a linked named process.
-
-  By default pool is registered locally, under the
-  name `:"Conns.Pool"`. This can be changed, add:
-
-      config :conn_pool,
-        POOL_NAME: :OtherName
-        # or
-        POOL_NAME: {:global, :OtherName}
-        # or
-        POOL_NAME: {:via, Module, :OtherName}
-
-  to your config file or provide `:name` option:
-
-      start_link( name: :OtherName)
-      # or
-      start_link( name: {:global, :OtherName})
-      # or
-      start_link( name: {:via, Module, :OtherName})
-
-  If you want to start many similar pools, for example
-  in multiuser app, use `name/2`.
+  Starts pool as a linked process.
 
   ## Specs
   Pool treats connections as childs, so every conn has
@@ -297,13 +247,11 @@ defmodule Conns.Pool do
   Pool uses `EventAction`. See [this](#module-health-care)
   """
   @spec start_link( [resources: [Conn.resource],
-                     specs: [eventAction_spec],
                      name: name])
         :: GenServer.on_start
 
-  def start_link( init_args \\ [resources: [], specs: [], name: @name]) do
-    init_args = init_args |> Keyword.put_new(:name, @name)
-                          |> Keyword.put_new(:resources, [])
+  def start_link( init_args \\ [resources: [], specs: []]) do
+    init_args = init_args |> Keyword.put_new(:resources, [])
                           |> Keyword.put_new(:specs, [])
 
     __MODULE__.Server.start_link( init_args)
@@ -315,6 +263,7 @@ defmodule Conns.Pool do
      Keyword.put_new( opts, :pool, @name)
   |> Keyword.put_new(       :emit, true)
   end
+
 
   @doc """
   Take connection from pool. You can always give it back with
@@ -383,7 +332,7 @@ defmodule Conns.Pool do
   managed by pool — it will be returned with timeout value
   in *micro*seconds (normally zero).
 
-  Use `Conn.state/2` to knew the actual state of returned
+  Use `Conn.state/2` to know the actual state of returned
   connection.
 
   ## Events
@@ -657,35 +606,35 @@ defmodule Conns.Pool do
   #   end
   # end
 
-  @doc """
-  Add tag to given connection so later it can be filtered
-  using `tags/1` with `Conns.Pool.lookup/4`, `Conns.Pool.take_first/4`
-  and any other pool's function that supports filter argument.
+  # @doc """
+  # Add tag to given connection so later it can be filtered
+  # using `tags/1` with `Conns.Pool.lookup/4`, `Conns.Pool.take_first/4`
+  # and any other pool's function that supports filter argument.
 
-  Use `Conn.Defaults` to define function `add_tag/2`, `delete_tag/2`
-  and `tags/1` to return `:notsupported`.
-  """
-  @spec add_tag( Conn.t, tag) :: Conn.t | :notsupported
-  def add_tag( conn, tag)
-
-
-  @doc """
-  Delete tag from given connection.
-
-  Use `Conn.Defaults` to define function `add_tag/2`, `delete_tag/2`
-  and `tags/1` to return `:notsupported`.
-  """
-  @spec delete_tag( Conn.t, tag) :: Conn.t | :notsupported
-  def delete_tag( conn, tag)
+  # Use `Conn.Defaults` to define function `add_tag/2`, `delete_tag/2`
+  # and `tags/1` to return `:notsupported`.
+  # """
+  # @spec add_tag( Conn.t, tag) :: Conn.t | :notsupported
+  # def add_tag( conn, tag)
 
 
-  @doc """
-  All tags associated with given connection. Tags can be added via
-  `Conn.add_tag/2` function and deleted via `Conn.delete_tag/2`.
+  # @doc """
+  # Delete tag from given connection.
 
-  Use `Conn.Defaults` to define function `add_tag/2`, `delete_tag/2`
-  and `tags/1` to return `:notsupported`.
-  """
-  @spec tags( Conn.t) :: [tag] | :notsupported
-  def tags( conn)
+  # Use `Conn.Defaults` to define function `add_tag/2`, `delete_tag/2`
+  # and `tags/1` to return `:notsupported`.
+  # """
+  # @spec delete_tag( Conn.t, tag) :: Conn.t | :notsupported
+  # def delete_tag( conn, tag)
+
+
+  # @doc """
+  # All tags associated with given connection. Tags can be added via
+  # `Conn.add_tag/2` function and deleted via `Conn.delete_tag/2`.
+
+  # Use `Conn.Defaults` to define function `add_tag/2`, `delete_tag/2`
+  # and `tags/1` to return `:notsupported`.
+  # """
+  # @spec tags( Conn.t) :: [tag] | :notsupported
+  # def tags( conn)
 end

@@ -5,11 +5,11 @@ defmodule Conns.Lib do
   given source in order that is given by `Conns.specs/1`
   protocol function.
   """
-  @spec init( Conns.source) :: [Conn.t]
-  def init( source) do
-    Conns.specs( source)
+  @spec init(Conns.source) :: [Conn.t]
+  def init(source) do
+    Conns.specs(source)
     |> Enum.map( fn {name, args} ->
-         Conn.init( struct( name), args ++ [source: source])
+         Conn.init( struct( name), args ++ [resource: resource])
        end)
   end
 end
@@ -17,12 +17,11 @@ end
 
 defprotocol Conns do
   @moduledoc """
-  Conn spec is a tuple that can be used to create connection
-  using `Conn.init/2` function.
+  Conn spec is a tuple that can be used to create connection using `Conn.init/2`
+  function.
 
-  List of initialized connections can be created using
-  `Conns.init/1` function. For this need `Conns` protocol should
-  be implemented for this source.
+  List of initialized connections can be created using `Conns.init/1` function.
+  For this need `Conns` protocol should be implemented for this source.
   """
 
   @type source :: term
