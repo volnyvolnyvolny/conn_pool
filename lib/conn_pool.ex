@@ -2,22 +2,24 @@ defmodule Conns.Pool do
   use Agent
 
   @moduledoc """
-  `Conn`s manager. To start pool use `start_link/1`.
+  `Conn`'s manager. To start pool use `start_link/1`, to add conns use
+  `Conn.init/2` and `put/3`, to use — `call/4`.
 
-  Now:
-
-  **Step 1. Provide pool with connections**
-
-  Use `Conn.init/2` and `put/2`:
-
-      Conn.init(MyConn, resource: %JSON_API{url: "http://example.com/api/v1"})
-      |> Conns.Pool.put()
-
-  **Step 2a. Choose and use connection**
-
-  Use `Conns.Pool.choose_and_call/4` or `Conns.Pool.choose_and_cast/4` to select
-  connection that is capable to interact via given method and make `Conn.call/3`
-  from process spawned by pool.
+      iex> pool = Conns.Pool.start_link()
+      iex> conn = Conn.init %Conn.Agent{}, fn -> 42 end
+      iex> resource = Conn.resource conn
+      iex> Conns.Pool.put pool, conn, type: :agent
+      iex> Conns.Pool.call pool, resource, :get, & &1
+      {:ok, 42}
+      iex> Conns.Pool.cast pool, resource, :update, & &1+1
+      :ok
+      iex> Conns.Pool.call pool, resource, :get, & &1
+      {:ok, 43}
+      iex> Conns.Pool.call pool, resource, :unknown_method
+      {:error, :unknownmethod}
+      iex> Conns.Pool.call pool, resource, :stop
+      iex> Conns.Pool.call pool, resource, :get, & &1
+      {:error, :closed}
 
       {:ok, conn} = Conns.Pool.choose_and_call( resource, :say, fn conn ->
                       # use filter to select preferred conn
@@ -101,91 +103,6 @@ defmodule Conns.Pool do
 
   An `Conn.Pool` is bound to the same name registration rules as `GenServer`s.
   Read more about it in the `GenServer` docs.
-
-  ## Health care
-
-  By analogy with `Supervisor` module `Conns.Pool` treats connections as a
-  childs. By default `Conns.Pool` will:
-
-  1. delete conn if it's came to final, `:closed` state;
-  2. try to `Conn.fix/2` connection if it's became `Conn.invalid?/1`;
-  3. try to `Conn.fix/3` connection if it's `Conn.state/2` == `:invalid` for
-  some of the `Conn.methods/1`;
-  4. recreate connection with given args if it failed to make steps 2 or 3.
-
-  To do so pool uses `EventAction` mechanism. It handles events and executes
-  corresponding actions. Behaviours could be easilly tuned. All you need is
-  to provide specs with different triggers and actions. For example, we can
-  write delete if could not default
-  behaviour is encoded as:
-
-      [ fn {:state_changed, {id, conn}, method, {from, :invalid}} ->
-          Conns.Pool.fix( )
-        end,
-
-        fn {:unable, :fix, {id, conn}, method} ->
-          Conns.Pool.fix( )
-        end,
-
-        fn {:unable, :fix, {id, conn}, method} ->
-          Conns.Pool.fix( )
-        end,
-
-        fn {:conn_closed, {id, conn}} ->
-          Conns.Pool.drop( )
-        end,
-
-        fn {:conn_invalidated, {id, conn}} ->
-          case Conn.fix( conn) do
-            {:ok, conn} -> 
-            {:error, error, conn} -> 
-            {:error, error} -> 
-          end
-        end]
-
-  The tuple element of the keyword has key `:__any__` (or `:_`) that means
-  "any of the connection `Conn.methods/1`". As a value, list of triggers&actions
-  were given. In this context, `became(:invalid, do: :fix)` means "if
-  `Conn.state/2` became equal to `:invalid`, do
-  `Conn.fix/3` — `Conn.fix( conn, method, init_args)`".
-
-  Sometimes `Conn.fix/2` returns `{:error, _}` tuple, means we failed to fix
-  connection. That's where `unable` macros became handy. In `:_` context,
-  `unable(:fix, do: :recreate)` means "if `Conn.fix/3` failed, change
-  connection with a fresh copy".
-
-  In the `:__all__` context, `became(:invalid, do: fix)` means "if connection
-  is `Conn.invalid?/1`, do `Conn.fix/2`".
-
-  Contexts:
-
-  * `:_` | `__any__` — trigger activated for any of the `Conn.methods/1`;
-  * `__all__` — corresponds to situation when all the defined triggers are
-  fired, for example `__all__: [became(:timeout, do: [{:log, "Timeout!"}, :panic]), became(:invalid, do: :fix)]` means that if *all* the `Conn.methods/1`
-  of connection have timeout, pool will log the "Timeout!" message and
-  after that execute `:panic` action. Second trigger would be used if
-  conn became `Conn.invalid?/1`. This case `Conn.fix/2` would be called.
-
-  Available actions:
-
-  * `{:log, message}` — add log message;
-  * `:delete` — delete connection from pool;
-  * `:fix` — in `__all__` context call `Conn.fix/2` function, in all the
-  other ones call `Conn.fix/3`;
-  * `:recreate` — change connection with the a fresh version returned by
-  `Conn.init/2`.
-  * `({pool_id, conn_id, conn} -> [action])` — of course, in the `do block`
-  arbitrary function can be given;
-  * `[action]` — list of actions to make, for ex.: [:fix, :1]
-
-  Triggers:
-
-  * `became( new_state, do: action|actions)` — if given
-  * `became( new_state, mark: atom, do block)` — if given
-  * `tagged( new_tag, do block)`;
-  * `untagged( deleted_tag, do block)`;
-  * `unable( mark, do block)`.
-
 
   System has two timeouts: (1) refresh rate that prevents from using connection
   too frequently; (2) pool timeout that can be setted by user, for example, in
