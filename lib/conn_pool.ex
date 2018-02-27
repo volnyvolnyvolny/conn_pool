@@ -1,27 +1,17 @@
 defmodule Conns.Pool do
-  use AgentMap # defines child_spec
+  use Agent
 
   @moduledoc """
-  `Conn`s manager. To start single or multiple pools use `start_link/1`.
+  `Conn`s manager. To start pool use `start_link/1`.
+
   Now:
 
   **Step 1. Provide pool with connections**
 
   Use `Conn.init/2` and `put/2`:
 
-      Conn.init( MyConn, resource: %JSON_API{url: "http://example.com/api/v1"})
+      Conn.init(MyConn, resource: %JSON_API{url: "http://example.com/api/v1"})
       |> Conns.Pool.put()
-
-      # or
-
-      Conns.init( resource)
-      |> Enum.each(&Conns.Pool.put/2)
-
-  the latter requires `Conns` protocol to be implemented for the given
-  resource.
-
-  If you provide `start_link/1` with param `:resource` — it will initialize
-  pool with `Enum.flat_map( opts[:resource], &Conns.init/1)` conns.
 
   **Step 2a. Choose and use connection**
 

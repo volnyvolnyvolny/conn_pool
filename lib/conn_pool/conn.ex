@@ -83,6 +83,7 @@ end
 
 
 defprotocol Conn do
+
   @moduledoc """
   High level abstraction that represents connection in the most common sense.
   Implementation can use any transport to connect to any remote or VM-local
@@ -107,6 +108,17 @@ defprotocol Conn do
     * `undo/3` — support Sagas-transactions.
   """
 
+  @enforce_keys [:conn]
+  @defstruct [:conn,
+              methods: [],
+              tags: [],
+
+              init_args: nil,
+
+              last_call: System.system_time(),
+              timeout: 0, penalty: 0]
+
+
   @type  t :: term
   @type  id :: non_neg_integer
 
@@ -115,20 +127,7 @@ defprotocol Conn do
   @type  resource :: any
   @type  reply :: any
   @type  reason :: any
-
-  # @type  state :: :ready | :invalid | :closed
-  # @type  action :: :fix | :panic | :poolrestart | (Conn.t -> :ok) | :close | :reinit
-  # @type  spec :: [{method | :_, {:onbecame, state, action}
-  #                             | {:onerror, action}}]
-
-  # @doc """
-  # Child spec (by analogy with `Supervisor` childs).
-
-  # Module `Conn.Defaults` has default implementation of `child_spec/1`.
-  # It returns: :normal_strategy.
-  # """
-  # @spec child_spec( Conn.t) :: spec
-  # def child_spec( conn)
+  @type  init_args :: any
 
 
   @doc """
@@ -145,7 +144,7 @@ defprotocol Conn do
       iex> conn1 == conn2
       true
   """
-  @spec init(Conn.t, any) :: {:ok, Conn.t} | {:error, reason}
+  @spec init(Conn.t, init_args) :: {:ok, Conn.t} | {:error, reason}
   def init(_conn, args \\ nil)
 
 
@@ -155,8 +154,7 @@ defprotocol Conn do
   ## Returns
 
     * `{:ok, timeout, conn}`, where `timeout` is the number of milliseconds
-    *suggested* to wait until `call/3` again (or `:infinity` to suggest to never
-    *call again).
+      *suggested* to wait until make any `call/3` on this connection again.
     * `{:ok, reply, timeout, conn}`, where `reply` is the response data;
 
     * `{:error, :closed}` if connection is closed;
@@ -178,10 +176,11 @@ defprotocol Conn do
       iex> Conn.call conn, :get, & &1
       {:error, :closed}
   """
-  @spec call(Conn.t, Conn.method, any) :: {:ok,        0 | timeout, Conn.t}
-                                        | {:ok, reply, 0 | timeout, Conn.t}
-                                        | {:error, :closed}
-                                        | {:error, :needauth | reason, 0 | timeout, Conn.t}
+  @spec call(Conn.t, Conn.method, any)
+        :: {:ok,        0 | pos_integer, Conn.t}
+         | {:ok, reply, 0 | pos_integer, Conn.t}
+         | {:error, :closed}
+         | {:error, :needauth | reason, 0 | pos_integer, Conn.t}
   def call(conn, method, payload \\ nil)
 
 
@@ -281,6 +280,7 @@ defprotocol Conn do
 
   @type data :: any
   @type rest :: data
+
 
   @doc """
   Parse data in context of given connection.

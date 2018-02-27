@@ -1,186 +1,83 @@
 defmodule Conns.Pool.Server do
+  @moduledoc false
+
   use GenServer
 
-  @moduledoc """
-  GenServer back end for connections pool.
-  """
-
-#   import Conns.Pool.ETS
   import NaiveDateTime
 
-# #   import Enum, only: [map: 2]
 
   # Generate uniq id
-  defp gen_id( max_id) do
-    if :os.system_time(:microsecond) < max_id do
-      raise "Error! System time changed! Id ordering cannot be guaranted!"
-    else
-     :os.system_time(:microsecond)
+  defp gen_id(), do: System.system_time()
+
+
+  def init(args) do
+   :rand.seed(:exsp)
+
+    Process.put :'$penalty', args[:penalty] || fn
+      0 -> 50
+      p when p < 3000 -> p*2
+      p -> p
     end
+
+    #      resources,      conns
+    {:ok, {AgentMap.new(), AgentMap.new()}}
   end
 
 
-  @doc """
-  Initialize server.
+  def start_link(args, opts) do
+    GenServer.start_link(__MODULE__, args, opts)
+  end
 
-  If sources list provided, `Conns.init` call made for every
-  resource and connections returned are added to pool.
-  """
-  def init( args) do
-    :rand.seed(:exsp)
-
-     table = :ets.new(:_, [:ordered_set, :private])
-
-     args[:resources]
-  |> Enum.flat_map(&Conns.init/1)
-  |> Enum.each(& handle_call( {:put, &1, 0, nil}, self(), {table, 0}))
-
-     {:ok, {table, 0}}
+  def start(args, opts) do
+    GenServer.start(__MODULE__, args, opts)
   end
 
 
-  @doc """
-  Starts corresponding GenServer. Use `Conns.Pool.start_link/1` instead.
-  """
-  def start_link( init_args) do
-    GenServer.start_link(__MODULE__, init_args, name: init_args[:name])
+  def handle_call({:put, conn, tags, init_args}, _f, {resources, conns}=state) do
+    conn = %Conn{conn: conn,
+                 init_args: init_args,
+                 tags: tags}
+
+    id = gen_id()
+
+    AgentMap.put conns, id, conn
+    AgentMap.update resources, Conn.resource(conn), fn
+      nil -> [id]
+      ids -> [id|ids]
+    end
+
+    {:reply, id, state}
   end
 
 
-  def handle_call( {:put, conn, timeout, id}, _from, {table, max_id}) do
-    id = id || gen_id( max_id)
+  def handle_call({:call, res, method, payload, filter}, _f, state) do
+    {resources, conns} = state
+    ids = AgentMap.fetch! resources, res
+    conns = for id <- ids,
+                conn = AgentMap.fetch!(conns, id),
+                method in conn.methods,
+                filter.(conn) do
 
-    next_try = if timeout > 0 do
-                 {:next_try, add( utc_now(), timeout, :microseconds)}
-               end
-
-    :ets.insert( table, {id, next_try, conn})
-
-    {:reply, id, {table, max_id}}
-  end
-
-  def handle_call( {:grab, id}, _from, {table, max_id}) do
-    reply = with  [{^id, nil, conn}] <- :ets.lookup( table, id),
-                  warnings = Conn.warnings( conn),
-                  false <- Enum.any?( warnings, fn {_,state} -> state == :closed end) do
-
-              {:ok, conn, warnings}
-            else
-              [] ->
-                 {:error, :notfound}
-
-              [{^id, {:next_try, next_try}, conn}] ->
-
-                 if (compare( next_try, utc_now()) in [:lt, :eq]) do
-                   conn
-                 else
-                   {:error, {:timeout, diff( next_try, utc_now(), :microseconds)}}
-                 end
-
-              _ -> {:error, :closed}
+              {id, conn}
             end
 
-    {:reply, reply, {table, max_id}}
+    conns = Enum.sort_by conns, fn {id,conn} ->
+      len = AgentMap.queue_len conns, id
+      conn.timeout
+    end
+
+    AgentMap.update conns, id, fn ->
+    end
+
+    {:noreply, state}
   end
 
-# #   # Given spec match tuple?
-# #   defp match_spec( {_,_,conn}=tuple, {source_id, data_type, auth}) do
-# #      data_type in Conn.data_types( conn)
-# #   && source_id == Conn.source_id( conn)
-# #   && auth in [:_, Conn.auth( conn)]
-# #   end
 
-
-
-# #   # Find first tuple with conn ready for use and
-# #   # all the conditions are stand.
-# #   defp find_ready( table, {_source_id, data_type,_auth}=spec) do
-# #    :ets.foldl( fn {_,_,conn}=tuple, acc ->
-
-# #       acc || if match_spec?( tuple, spec)
-# #              && ready_for_use?( tuple, data_type) do
-
-# #                tuple
-# #              end
-# #     end, nil, table)
-# #   end
-
-
-
-#   def handle_call( {:get, id}, _from, table) do
-#     {:reply,
-#      case :ets.lookup( table, id) do
-#        [{^id, nil, conn}] -> conn
-#        [{^id, {:next_try, next_try}, conn}] ->
-#          if (compare( next_try, utc_now()) in [:lt, :eq]) do
-#            conn
-#          else
-#            {:error, {:timeout, diff( next_try, utc_now(), :microseconds)}}
-#          end
-#        [] -> {:error, :not_found}
-#      end,
-#      table}
-#   end
-
-
-#   def handle_call( {:take, id}, from, table) do
-#     with {:ok, _conn} <- handle_call( {:get, id}, from, table) do
-#      :ets.delete( table, id)
-#     end
-#   end
-
+  def handle_call({:pop, id}, _f, {_, conns}=state) do
+    {:reply, AgentMap.pop(conns, id), state}
+  end
 
 #   def handle_call( {:update_conn, {id, conn}}, _from, table) do
-#     case :ets.lookup( table, id) do
-#       [{^id, timeout, _conn}] -> :ets.insert( table, {id, timeout, conn})
-#       [] -> :ets.insert( table, {id, nil, conn})
-#     end
-
-#     {:reply, conn, table}
-#   end
-
-
-#   def handle_call( {:lookup, {source, int_type_s, filter}}, _from, table) do
-
-#     :ets.foldl( fn {id, timeout, conn}, list ->
-#       timeout = case timeout do
-#                   nil -> 0
-#                   {:next_try, :never} -> :infinity
-#                   {:next_try, next_try} -> diff( next_try, utc_now(), :microseconds)
-#                 end
-
-#       timeout = if timeout < 0 do 0 else timeout end
-
-#       with :cannot <- Conn.state( conn) do
-#         list
-#       else
-#        :invalid                 -> [{id, :invalid} | list]
-#        :ready                   -> [{id, timeout, conn} | list]
-#        {:timeout, conn_timeout} -> [{id, max( timeout, conn_timeout), conn} | list]
-#        :needauth                -> [{id, :needauth, conn} | list]
-#        {:needauth, {:timeout, conn_timeout}} -> [{id, :needauth, conn} | list]
-#       end
-     
-#       state = with {:timeout, timeout} <- Conn.state( conn) do
-#                 timeout
-#               else
-#                 :invalid -> :invalid
-#                 _ -> 
-#               end || 0
-      
-
-#       if filter.(conn) do
-#         [{id, case timeout do
-#                 nil -> {id, 0, conn}
-#                 {:next_try, :never} -> [{id, :infinity, conn} | list]
-#                 {:} -> [{id, 0, conn} | list]
-#          end, conn} | list]
-#       else
-#         list
-#       end
-#     end, [], table)
-
-    
 #     case :ets.lookup( table, id) do
 #       [{^id, timeout, _conn}] -> :ets.insert( table, {id, timeout, conn})
 #       [] -> :ets.insert( table, {id, nil, conn})
