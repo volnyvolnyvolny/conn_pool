@@ -220,96 +220,103 @@ defmodule Conn.Pool do
 
 
   @doc """
-  Makes `Conn.call/3` to connection with given id.
+  Makes `Conn.call/3` to given resource via given method of interaction.
 
-  Pool respects refresh timeout value returned by `Conn.call/3`.
+  Optional `filter` param could be provided in form of `(%Conn{} -> boolean |
+  priority)` callback, where `priority` is a `pos_integer`. So:
 
-  ## Examples
+    * `false` means conn will not be used;
+    * `true` | `p > 0` means conn can be used;
 
-      iex> source = %JSON_API{url: "http://example.com/api/v1"}
-      iex> {:ok, {id, _conn}} = Pool.fetch_first( source, [:say, :listen])
-      iex> :ok = Pool.call( id, :say, what: "Hi!")
+  Pool will use the least loaded conn with the least `p`.
+
+  Pool respects refresh timeout value returned by `Conn.call/3`. After each call
+  pool rewrites `:timeout` field of the corresponding `%Conn{}` struct.
+
+  ## Returns
+
+    * `{:error, :resource}` if there is no conns to given `resource`;
+    * `{:error, :method}` if there exists conns to given `resource` but they does
+    not provide given `method` of interaction;
+    * `{:error, :filter}` if there is no conns satisfying `filter`;
+
+    * `{:error, :timeout}` if `Conn.call/3` returned `{:error, :timeout, _, _}`
+      and there is no other connection capable to make this call;
+    * `{:error, :needauth}` if all the appropriate conns returned `{:error,
+      :needauth, _, _}` as the result of the `Conn.call/3`;
+    * and `{:error, reason}` in case of `Conn.call/3` returned arbitrary error.
+
+    * `{:ok, reply}` in case of success.
   """
-  @spec call( Conn.id, Conn.method, id, keyword) :: :ok
-                                                   | {:ok, any}
-                                                   | {:error, any | {:timeout, timeout}}
-  def call( id, method, pool_id, specs \\ []) do
-    Server.name( pool_id)
-    |> GenServer.call( {:call, {id, method, specs}})
+  @spec call( Conn.Pool.t, Conn.resource, Conn.method, any)
+        :: {:ok, Conn.reply} | {:error, :resource | :method | :timeout | :needauth}
+  @spec call( Conn.Pool.t, Conn.resource, Conn.method, filter, any)
+        :: {:ok, Conn.reply} | {:error, :resource | :method | :filter}
+  def call( pool, resource, method, payload \\ nil) do
+    GenServer.call pool, {:call, resource, method, fn _ -> true end, payload}
+  end
+
+  def call( pool, resource, method, filter, payload) do
+    GenServer.call pool, {:call, resource, method, filter, payload}
   end
 
 
   @doc """
   `cast/4` is a "call and forget" and returns `:ok` immediately if there is a
-  connection capable to make such call, or `{:error, :resource} | {:error,
-  :method}` otherwise.
+  connection capable to interact with given resource via given method, or
+  `{:error, :resource} | {:error, :method}` otherwise.
+
+  Optional `filter` param could be provided in this case, also, `{:error,
+  :filter}` could be returned.
 
   See `call/4` for details.
   """
   @spec cast( Conn.Pool.t, Conn.resource, Conn.method, any)
         :: :ok | {:error, :resource | :method}
-  def cast( pool, resource, method, payload) do
-    GenServer.call pool, {:cast, resource, method, payload}
+  @spec cast( Conn.Pool.t, Conn.resource, Conn.method, filter, any)
+        :: :ok | {:error, :resource | :method | :filter}
+  def cast( pool, resource, method, payload \\ nil) do
+    GenServer.call pool, {:cast, resource, method, fn _ -> true end, payload}
+  end
+  def cast( pool, resource, method, filter, payload) do
+    GenServer.call pool, {:cast, resource, method, filter, payload}
   end
 
 
   @doc """
-  `:extra` field of `%Conn{}` is useful for filter conns used for call.
-
-  It returns .
+  `:extra` field of `%Conn{}` is useful for filter conns used for call. Calling
+  `extra/3` will change `:extra` field of connection with given `id`, while
+  returning the old value in form of `{:ok, old extra}` or `:error` if pool
+  don't known conn with such id.
 
   ## Example
 
       iex> pool = Conn.Pool.start()
-      iex> conn1 = Conn.init %Conn.Agent{}, fn -> 24 end
-      iex> conn2 = Conn.init %Conn.Agent{}, fn -> 33 end
-      iex> conn3 = Conn.init %Conn.Agent{}, fn -> 42 end
-      iex> id1 = Conn.Pool.put pool, conn1, :main
-      iex> %Conn{conn: conn2, extra: :secondary}
-      iex> id2 = Conn.Pool.put pool, conn2, :secondary
-
-      iex> id2 = Conn.Pool.init %Conn.Agent{}, fn -> 43 end
-
-      iex> Conn.Pool.extra pool, id1, :main
+      iex> {:ok, agent} = Agent.start fn -> 42 end
+      iex> {:ok, id} = Conn.Pool.init pool, %Conn.Agent{}, agent: agent
+      iex> Conn.Pool.extra pool, id, :extra
       nil
-      iex> Conn.Pool.extra pool, id2, :secondary
-      iex> Conn.Pool.call &1
+      iex> Conn.Pool.extra pool, id, :some
+      :extra
+      #
+      # now let's use it to filter conns
+      #
+      iex> filter = fn
+      ...>   %Conn{extra: :extra} -> true
+      ...>   _ -> false
+      ...> end
+      iex> Conn.Pool.call pool, agent, :get, filter, & &1
+      {:error, :filter}
+      #
+      # but:
+      #
+      iex> Conn.Pool.call pool, agent, :get, fn
+      ...>   %Conn{extra: :some} -> true
+      ...> end, & &1
+      {:ok, 42}
   """
   @spec extra( Conn.Pool.t, id, extra) :: {:ok, any} | :error
   def extra( pool, id, extra) do
     GenServer.call pool, {:extra, id, extra}
   end
-
-
-  # @doc """
-  # Add tag to given connection so later it can be filtered
-  # using `tags/1` with `Conns.Pool.lookup/4`, `Conns.Pool.take_first/4`
-  # and any other pool's function that supports filter argument.
-
-  # Use `Conn.Defaults` to define function `add_tag/2`, `delete_tag/2`
-  # and `tags/1` to return `:notsupported`.
-  # """
-  # @spec add_tag( Conn.t, tag) :: Conn.t | :notsupported
-  # def add_tag( conn, tag)
-
-
-  # @doc """
-  # Delete tag from given connection.
-
-  # Use `Conn.Defaults` to define function `add_tag/2`, `delete_tag/2`
-  # and `tags/1` to return `:notsupported`.
-  # """
-  # @spec delete_tag( Conn.t, tag) :: Conn.t | :notsupported
-  # def delete_tag( conn, tag)
-
-
-  # @doc """
-  # All tags associated with given connection. Tags can be added via
-  # `Conn.add_tag/2` function and deleted via `Conn.delete_tag/2`.
-
-  # Use `Conn.Defaults` to define function `add_tag/2`, `delete_tag/2`
-  # and `tags/1` to return `:notsupported`.
-  # """
-  # @spec tags( Conn.t) :: [tag] | :notsupported
-  # def tags( conn)
 end

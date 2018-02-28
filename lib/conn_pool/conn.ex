@@ -110,11 +110,12 @@ defprotocol Conn do
 
   @enforce_keys [:conn]
   @defstruct [:conn,
-              methods: [],
-              tags: [],
+              :init_args,
+              :extra,
+              :expires,
 
+              methods: [],
               reinit: false,
-              init_args: nil,
 
               stats: %{},
 
