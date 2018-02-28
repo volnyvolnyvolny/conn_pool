@@ -113,7 +113,12 @@ defprotocol Conn do
               methods: [],
               tags: [],
 
+              reinit: false,
               init_args: nil,
+
+              stats: %{},
+
+              penalty: :pooldef,
 
               last_call: System.system_time(),
               timeout: 0, penalty: 0]
@@ -180,7 +185,7 @@ defprotocol Conn do
         :: {:ok,        0 | pos_integer, Conn.t}
          | {:ok, reply, 0 | pos_integer, Conn.t}
          | {:error, :closed}
-         | {:error, :needauth | reason, 0 | pos_integer, Conn.t}
+         | {:error, :needauth | :timeout | reason, 0 | pos_integer, Conn.t}
   def call(conn, method, payload \\ nil)
 
 

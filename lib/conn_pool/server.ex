@@ -10,10 +10,10 @@ defmodule Conns.Pool.Server do
   defp gen_id(), do: System.system_time()
 
 
-  def init(args) do
+  def init(penalty) do
    :rand.seed(:exsp)
 
-    Process.put :'$penalty', args[:penalty] || fn
+    Process.put :'$penalty', penalty || fn
       0 -> 50
       p when p < 3000 -> p*2
       p -> p
