@@ -109,20 +109,19 @@ defprotocol Conn do
   """
 
   @enforce_keys [:conn]
-  @defstruct [:conn,
-              :init_args,
-              :extra,
-              :expires,
+  defstruct [:conn,
+             :init_args,
+             :extra,
+             :expires,
+             :penalties,
 
-              methods: [],
-              reinit: false,
+             methods: [],
+             reinit: false,
 
-              stats: %{},
+             stats: %{},
 
-              penalty: :pooldef,
-
-              last_call: System.system_time(),
-              timeout: 0, penalty: 0]
+             last_call: System.system_time(),
+             timeout: 0, penalty: 0]
 
 
   @type  t :: term
@@ -164,8 +163,6 @@ defprotocol Conn do
     * `{:ok, reply, timeout, conn}`, where `reply` is the response data;
 
     * `{:error, :closed}` if connection is closed;
-    * `{:error, :needauth, timeout, conn}` means that given action needs
-      authentication;
     * `{:error, reason, timeout, conn}` in case of arbitrary error.
 
   ## Examples
@@ -186,7 +183,7 @@ defprotocol Conn do
         :: {:ok,        0 | pos_integer, Conn.t}
          | {:ok, reply, 0 | pos_integer, Conn.t}
          | {:error, :closed}
-         | {:error, :needauth | :timeout | reason, 0 | pos_integer, Conn.t}
+         | {:error, :timeout | reason, 0 | pos_integer, Conn.t}
   def call(conn, method, payload \\ nil)
 
 
@@ -234,33 +231,6 @@ defprotocol Conn do
   """
   @spec resource(Conn.t) :: resource | [resource]
   def resource(conn)
-
-
-  @doc """
-  Authenticate connection.
-
-  It's suggested to use `Conn.set_auth(conn, nil)` as a syntax for dropping
-  connection.
-
-  ## Returns
-
-    * `{:ok, conn}` — authentication succeed, return updated connection;
-    * `{:ok, :already, conn}` — conn is already authenticated;
-
-    * `{:error, :closed}` — connection was closed;
-    * `{:error, :notsupported}`, if authentification is not supported;
-    * `{:error, reason, conn}`, if error happend while making auth.
-
-  Module `Conn.Defaults` has default implementation of `set_auth/3` that
-  just returns `{:error, :notsupported}`.
-  """
-  @spec set_auth(Conn.t, auth | nil)
-        :: {:ok, Conn.t}
-         | {:ok, :already, Conn.t}
-
-         | {:error, :closed | :notsupported}
-         | {:error, reason, Conn.t}
-  def set_auth(conn, auth)
 
 
   @doc """

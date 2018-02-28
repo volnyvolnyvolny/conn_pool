@@ -13,10 +13,10 @@ defmodule Conn.Pool do
   `Conn.Pool.call/4` or `Conn.Pool.cast/4`.
 
   In the following examples, `%Conn.Agent{}` represents connection to some
-  `Agent` that can be created separately or via `Conn.Agent.init/2`. Available
-  methods of interaction are `:get, :get_and_update, :update` and `:stop` (see
+  `Agent` that can be created separately or via `Conn.init/2`. Available methods
+  of interaction are `:get, :get_and_update, :update` and `:stop` (see
   `Conn.methods/1`). This conns means to exist only as an example for doctests.
-  More meaningful example would be `%Conn.Plug{}` wrapper.
+  More meaningful example would be `%Conn.Plug{}`, that is a wrapper.
 
       iex> pool = Conn.Pool.start()
       iex> conn = Conn.init %Conn.Agent{}, fn -> 42 end
@@ -101,91 +101,87 @@ defmodule Conn.Pool do
   Read more about it in the `GenServer` docs.
   """
 
+  @type  t :: GenServer.t
   @type  id :: pos_integer
-  @type  penalty :: (non_neg_integer -> non_neg_integer | :infinity)
+  @type  reason :: any
+  @type  penalty :: non_neg_integer | :infinity
+  @type  filter :: (%Conn{} -> boolean | non_neg_integer)
+
+  @penalties [50, 100, 500, 1000, 2000, 5000]
+
 
   @doc """
   Starts pool as a linked process.
 
-  Default penalty function is:
-
-      fn 0 -> 50
-         p when p < 4050 -> p*3
-         p -> p
-      end
-
-  On the first error in series penalty will be 50 ms, after it grows as: `50,
-  150, 450, 1350, 4050, 4050, …`
-
-  Also, penalty could be setted to `:infinity` — this way it is treated by pool
-  as closed.
+  As an init argument, penalties list in ms could be provided. By default it's
+  `[50, 100, 500, 1000, 2000, 5000]`, which means that every connection, by
+  default, after the first error will wait 50 ms until used again. If error
+  happenes again after retry, time penalty grows as `50 ms, 100 ms, …, 5000 ms,
+  5000 ms, 5000 ms` and so on. Also, `[…, :infinity]` means that after a few
+  tryies conn would be treated by pool as closed (it will be deleted or
+  reinited).
   """
-  @spec start_link( GenServer.options) :: GenServer.on_start
-  @spec start_link( penalty, GenServer.options) :: GenServer.on_start
-  def start_link( penalty \\ nil, opts) do
-    __MODULE__.Server, penalty, opts
+  @spec start_link([penalty], GenServer.options) :: GenServer.on_start
+  def start_link( penalties \\ @penalties, opts) do
+    GenServer.start_link __MODULE__.Server, penalties, opts
   end
-
 
 
   @doc """
-  Starts pool.
-
-  See `start_link/2` for details.
+  Starts pool. See `start_link/2` for details.
   """
-  @spec start( GenServer.options) :: GenServer.on_start
-  @spec start( penalty, GenServer.options) :: GenServer.on_start
-  def start( penalty \\ nil, opts) do
-    __MODULE__.Server, penalty, opts
+  @spec start([penalty], GenServer.options) :: GenServer.on_start
+  def start( penalties \\ @penalties, opts) do
+    GenServer.start __MODULE__.Server, penalties, opts
   end
 
-  @doc """
-  Put connection to pool.
+  # @doc """
+  # Put connection to pool.
 
-  Some of the conn methods can became `:invalid`. `Conn.state/2` == `:invalid`
-  means that you are not capable to use selected method via `Conn.call/3`.
+  # Some of the conn methods can became `:invalid`. `Conn.state/2` == `:invalid`
+  # means that you are not capable to use selected method via `Conn.call/3`.
 
-  You can still take connection if there are at least one method that is
-  `:ready`.
+  # You can still take connection if there are at least one method that is
+  # `:ready`.
 
-  Pool respects order. Timestamps used as ids. So on any `*_one` call conns that
-  injected earlier will be returned.
+  # Pool respects order. Timestamps used as ids. So on any `*_one` call conns that
+  # injected earlier will be returned.
 
-  Conns.Pool.info pool, id
+  # Conns.Pool.info pool, id
 
-  On a highly unlikely event, when `:id` param is given and there is already
-  connection exists with such id runtime error would be raised.
+  # On a highly unlikely event, when `:id` param is given and there is already
+  # connection exists with such id runtime error would be raised.
 
-  ## Params
+  # ## Params
 
-  * `:spec` param can be given, see [corresponding section](#module-child-spec);
-  * `:id` can be selected manually; `:pool` id can be used; `:timeout` can be
-    given to restrict others to use this connection in any way during timeout
-  * period. Timeout is encoded in *micro*seconds (=10^-6 sec).
-  """
-  @spec put( Conn.t, [timeout: timeout,
-                      spec: Conn.spec,
-                      id: Conn.id,
-                      pool: id])
-        :: Conn.id
-  def put( conn, opts \\ [timeout: 0, spec: [], emit: true, pool: nil]) do
-    opts = opts |> with_defaults()
-                |> Keyword.put_new(:timeout, 0)
-                |> Keyword.put_new(:spec, Conn.child_spec( conn))
+  # * `:spec` param can be given, see [corresponding section](#module-child-spec);
+  # * `:id` can be selected manually; `:pool` id can be used; `:timeout` can be
+  #   given to restrict others to use this connection in any way during timeout
+  # * period. Timeout is encoded in *micro*seconds (=10^-6 sec).
+  # """
+  # @spec put( Conn.t, [timeout: timeout,
+  #                     spec: Conn.spec,
+  #                     id: Conn.id,
+  #                     pool: id])
+  #       :: Conn.id
+  # def put( conn, opts \\ [timeout: 0, spec: [], emit: true, pool: nil]) do
+  #   opts = opts |> with_defaults()
+  #               |> Keyword.put_new(:timeout, 0)
+  #               |> Keyword.put_new(:spec, Conn.child_spec( conn))
 
-    {:ok, id} = GenServer.call( opts[:pool],
-                                {:put, conn, opts[:timeout], opts[:id]})
+  #   {:ok, id} = GenServer.call( opts[:pool],
+  #                               {:put, conn, opts[:timeout], opts[:id]})
 
-    if opts[:emit] do
-      spawn( fn ->
-        EventAction.emit(
-          opts[:pool],
-          {:put, {:ok, {id, conn}, opts[:timeout], opts[:spec]}})
-      end)
-    else
-      id
-    end
-  end
+  #   if opts[:emit] do
+  #     spawn( fn ->
+  #       EventAction.emit(
+  #         opts[:pool],
+  #         {:put, {:ok, {id, conn}, opts[:timeout], opts[:spec]}})
+  #     end)
+  #   else
+  #     id
+  #   end
+  # end
 
 
   @doc """
@@ -215,23 +211,25 @@ defmodule Conn.Pool do
   """
   @spec pop( Conns.Pool.t, Conn.id) :: {:ok, %Conn{}}  | :error
   def pop( pool, id) do
-    GenServer.call pool, id, :infinity
+    GenServer.call pool, {:pop, id}, :infinity
   end
 
 
   @doc """
-  Makes `Conn.call/3` to given resource via given method of interaction.
+  Select one of the connections to given `resource` and make `Conn.call/3` via
+  given `method` of interaction.
 
   Optional `filter` param could be provided in form of `(%Conn{} -> boolean |
-  priority)` callback, where `priority` is a `pos_integer`. So:
+  priority)` callback, where `priority` is a `non_neg_integer`. Callback may return
 
-    * `false` means conn will not be used;
-    * `true` | `p > 0` means conn can be used;
+    * `false | nil`, specifying that conn will not be used;
+    * `true | p ≥ 0`, meaning that tested conn can be used.
 
-  Pool will use the least loaded conn with the least `p`.
+  Connections for which `true` or `p ≥ 0` returned are sorted and pool will
+  select the `Enum.min/1` value. O Pool will use the conn with the least `p`.
 
   Pool respects refresh timeout value returned by `Conn.call/3`. After each call
-  pool rewrites `:timeout` field of the corresponding `%Conn{}` struct.
+  `:timeout` field of the corresponding `%Conn{}` struct is rewrited.
 
   ## Returns
 
@@ -242,20 +240,21 @@ defmodule Conn.Pool do
 
     * `{:error, :timeout}` if `Conn.call/3` returned `{:error, :timeout, _, _}`
       and there is no other connection capable to make this call;
-    * `{:error, :needauth}` if all the appropriate conns returned `{:error,
-      :needauth, _, _}` as the result of the `Conn.call/3`;
     * and `{:error, reason}` in case of `Conn.call/3` returned arbitrary error.
 
-    * `{:ok, reply}` in case of success.
+  In case of `Conn.call/3` returns `{:error, :timeout | reason, _, _}`,
+  `Conn.Pool` will use time penalties series, defined per pool (see
+  `start_link/2`) or per connection (see `%Conn{} :penalties` field).
+
+    * `{:ok, reply} | :ok` in case of success.
   """
   @spec call( Conn.Pool.t, Conn.resource, Conn.method, any)
-        :: {:ok, Conn.reply} | {:error, :resource | :method | :timeout | :needauth}
+        :: :ok | {:ok, Conn.reply} | {:error, :resource | :method | :timeout | reason}
   @spec call( Conn.Pool.t, Conn.resource, Conn.method, filter, any)
-        :: {:ok, Conn.reply} | {:error, :resource | :method | :filter}
+        :: :ok | {:ok, Conn.reply} | {:error, :resource | :method | :filter | :timeout | reason}
   def call( pool, resource, method, payload \\ nil) do
     GenServer.call pool, {:call, resource, method, fn _ -> true end, payload}
   end
-
   def call( pool, resource, method, filter, payload) do
     GenServer.call pool, {:call, resource, method, filter, payload}
   end
@@ -284,10 +283,10 @@ defmodule Conn.Pool do
 
 
   @doc """
-  `:extra` field of `%Conn{}` is useful for filter conns used for call. Calling
-  `extra/3` will change `:extra` field of connection with given `id`, while
-  returning the old value in form of `{:ok, old extra}` or `:error` if pool
-  don't known conn with such id.
+  `:extra` field of `%Conn{}` is intended for filtering conns while making call.
+  Calling `extra/3` will change `:extra` field of connection with given `id`,
+  while returning the old value in form of `{:ok, old extra}` or `:error` if
+  pool don't known conn with such id.
 
   ## Example
 
@@ -298,8 +297,6 @@ defmodule Conn.Pool do
       nil
       iex> Conn.Pool.extra pool, id, :some
       :extra
-      #
-      # now let's use it to filter conns
       #
       iex> filter = fn
       ...>   %Conn{extra: :extra} -> true
@@ -315,7 +312,7 @@ defmodule Conn.Pool do
       ...> end, & &1
       {:ok, 42}
   """
-  @spec extra( Conn.Pool.t, id, extra) :: {:ok, any} | :error
+  @spec extra( Conn.Pool.t, id, any) :: {:ok, any} | :error
   def extra( pool, id, extra) do
     GenServer.call pool, {:extra, id, extra}
   end

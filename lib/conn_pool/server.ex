@@ -13,30 +13,16 @@ defmodule Conns.Pool.Server do
   def init(penalty) do
    :rand.seed(:exsp)
 
-    Process.put :'$penalty', penalty || fn
-      0 -> 50
-      p when p < 3000 -> p*2
-      p -> p
-    end
+    Process.put :'$penalty', penalty || [50, 100, 500, 1000, 2000, 5000]
 
     #      resources,      conns
     {:ok, {AgentMap.new(), AgentMap.new()}}
   end
 
 
-  def start_link(args, opts) do
-    GenServer.start_link(__MODULE__, args, opts)
-  end
-
-  def start(args, opts) do
-    GenServer.start(__MODULE__, args, opts)
-  end
-
-
-  def handle_call({:put, conn, tags, init_args}, _f, {resources, conns}=state) do
+  def handle_call({:put, conn, extra, init_args}, _f, {resources, conns}=state) do
     conn = %Conn{conn: conn,
-                 init_args: init_args,
-                 tags: tags}
+                 init_args: init_args}
 
     id = gen_id()
 
@@ -66,8 +52,8 @@ defmodule Conns.Pool.Server do
       conn.timeout
     end
 
-    AgentMap.update conns, id, fn ->
-    end
+    # AgentMap.update conns, id, fn ->
+    # end
 
     {:noreply, state}
   end
