@@ -10,73 +10,25 @@ defmodule Conn.Defaults do
         use Conn.Defaults
 
         # Callbacks:
+        def init(_, _), do: …
         def resource(_), do: …
-        def state(_, _), do: …
-        def call(_, _, _), do: …
         def methods(_), do: …
+        def call(_, _, _), do: …
 
         # Optional callbacks:
-        def init(_, _), do: …
-        def set_auth(_, _), do: …
         def undo(_, _, _), do: …
-        def child_spec(_), do: …
-
         def parse(_,_), do: …
       end
   """
 
-  @doc """
-  Connection is healthy if there is no method for which `Conn.state/2` function
-  returns `:invalid`.
-  """
-  @spec healthy?(Conn.t) :: boolean
-  def healthy?(conn) do
-    Enum.all?(Conn.methods(conn),
-              &Conn.state(conn, &1) != :invalid)
-  end
-
-
-  @doc """
-  Connection is invalid if for every method provided by `Conn.methods/1`,
-  `Conn.state/2` function returns `:invalid`.
-  """
-  @spec invalid?(Conn.t) :: boolean
-  def invalid?( conn) do
-    Enum.all?(Conn.methods(conn),
-              &Conn.state(conn, &1) == :invalid)
-  end
-
-
-  @doc """
-  Connection warnings is a list with pairs `{method, timeout | :invalid |
-  :closed}`. See `Conn.state/2` function.
-
-  ## Examples
-
-      Conn.warnings( conn) = [ask: :invalid, say: 65536]
-  """
-  @spec warnings( Conn.t) :: [{Conn.method, timeout | :invalid | :closed}]
-  def warnings( conn) do
-     Conn.methods( conn)
-  |> Enum.map( fn method -> {method, Conn.state( conn, method)} end)
-  |> Enum.filter( fn {_,state} -> state != :ready end)
-  end
-
-
   defmacro __using__(_) do
     quote do
 
-#      def child_spec(_conn), do: []
-#      def undo(_conn,_method,_specs), do: {:error, :notsupported}
-      def init( conn,_args), do: {:ok, conn}
-      def parse(_conn,_data), do: {:error, :notsupported}
-      def set_auth(_conn, _auth), do: {:error, :notsupported}
+#      def undo(_conn,_method,_specs), do: {:error, :notimplemented}
+      def parse(_conn,_data), do: {:error, :notimplemented}
 
-      defoverridable [#child_spec: 1,
-                      init: 2,
-                      parse: 2,
-                      undo: 3,
-                      set_auth: 3]
+      defoverridable [#undo: 3,
+                      parse: 2]
     end
   end
 end
@@ -87,26 +39,137 @@ defprotocol Conn do
   @moduledoc """
   High level abstraction that represents connection in the most common sense.
   Implementation can use any transport to connect to any remote or VM-local
-  resources, such as `Agent`s, `GenServer`s, different APIs and, any
-  http-resources.
+  resource: `Agent`, `GenServer`, different http-APIs, etc.
 
   ## Callbacks
 
-    * `resource/1` — resource for corresponding connection. *You can also return
-    list of resources*;
-    * `methods/1` — methods supported in connection calls;
-    * `state/2` — state of connection in respect of method (`:ready` for
-    interaction; `:invalid`; was `:closed`; `:notsupported`);
+    * `init/2` — initialize connection with given arguments;
+    * `resource/1` — resource for that interaction is made;
+    * `methods/1` — methods supported while making `Conn.call/3`;
     * `call/3` — interact via selected method.
 
   ## Optional callbacks
 
-    * `init/2` — initialize connection with given arguments;
-    * `child_spec/1` — child spec by analogy with `Supervisor`s childs;
-    * `parse/2` — parse data in respect of connection context;
-    * `set_auth/2` — authenticate connection;
-    * `undo/3` — support Sagas-transactions.
-  """
+    * `parse/2` — parse data in respect of connection context.
+
+  ## Example
+
+  Let's implement simple generic text-base interaction protocol. Client can send
+  server commands in the format of `:COMMAND;` or `:COMMAND:ARGS;` to execute
+  `COMMAND` with given `ARGS` or without them. There is a special command
+  `:COMMANDS;` returns available commands;
+
+  Server may reply with `ok:COMMAND1,CMD2,…`, `ok`, `ok:DATA` or `err:REASON`,
+  where `REASON` could be `notsupported` (command), `parse`, `badarg`, or any
+  other.
+
+  Now simple test conn will look like:
+
+      defmodule TextConn, do: defstruct [:res, :commands]
+
+  Let's implement protocol described above:
+
+      defimpl Conn, for: TextConn do
+
+        def init(conn, pid), do: %{conn | res: pid}
+        def resource(%_{res: pid}), do: pid
+
+        def methods(%_{res: pid}=conn) do
+          unless Process.alive? pid do
+            :error
+          else
+            send pid, ":COMMANDS;"
+            receive do
+              "ok:"<>cmds -> cmds = String.split ","
+                             {cmds, %{conn | commands: cmds}}
+            after 5000 -> :error
+            end
+          end
+        end
+
+        def call(%_{res: pid, commands: cs}=c, cmd, args\\\\"") when cmd in cs do
+          unless Process.alive? pid do
+            {:error, :closed}
+          else
+            send pid, if args == "", do: ":\#{cmd};", else: ":\#{cmd}:\#{args};"
+
+            receive do
+              "ok;" ->  {:ok, 0, c}
+              "ok:"<>reply ->  {:ok, reply, 0, c}
+
+              "err:notsupported" ->  {:error, :notsupported, 50, c} # suggests timeout 50 ms
+              "err:"<>reason ->      {:error, reason, 50, c}
+            after 5000 ->
+              {:error, :timeout, 0, c}
+            end
+          end
+        end
+        def call(%_{res: pid}=c, _cmd, _args), do: {:error, :notsupported, 50, c}
+
+    — it's the part of the implementation used on the client side, and now
+    parsing:
+
+        def parse(conn, ""), do: :ok
+        def parse(conn, ":COMMANDS;"<>rest), do: {:ok, :methods, rest}
+        def parse(conn, ":"<>data) do
+          case Regex.named_captures ~r[(?<cmd>.*)(:(?<args>.*))?;(?<rest>.*)], data do
+            %{"cmd" => cmd, "args" => args, "rest" => rest} ->
+              {:ok, {:call, cmd, args}, rest}
+            nil ->
+              {:error, :needmoredata}
+          end
+        end
+        def parse(conn, malformed) do
+          case String.split data, ";" do
+            [malformed, rest] ->
+              {:error, {:parse, malformed}, rest}
+            _ ->
+              {:error, :needmoredata}
+          end
+        end
+      end
+
+    That's it. Now all that left is to spawn corresponding server that will
+    interact with client using above protocol. Let us implement server that
+    holds integer value and supports commands `INC`, `GET` and `STOP`.
+
+        iex> defmodule Server do
+     ...>   def loop(data, state \\\\ 0) do
+     ...>     receive do
+     ...>       {pid, new} ->
+     ...>         data = data<>new
+     ...>         case Conn.parse %TestConn{}, data do
+     ...>           {:error, :needmoredata} -> loop rest, state
+     ...>           {:error, {:parse,_}, rest} ->
+     ...>              send pid, "err:parse"
+     ...>              loop rest, state
+     ...>           {:ok, :methods, rest} ->
+     ...>              send pid, "ok:INC,GET,STOP"
+     ...>              loop rest, state
+     ...>           {:ok, {:call, "INC", ""}, rest} ->
+     ...>              send pid, "ok:"<>state+1
+     ...>              loop rest, state+1
+     ...>           {:ok, {:call, "GET", ""}, rest} ->
+     ...>              send pid, "ok:"<>state
+     ...>              loop rest, state
+     ...>           {:ok, {:call, "STOP", ""}, rest} ->
+     ...>              send pid, "ok"
+     ...>         end
+     ...>     end
+     ...>   end
+     ...> end
+     ...>
+     ...>
+     iex> pid = spawn_link fn -> Server.loop "" end
+     iex> pool = Conn.Pool.start_link()
+     iex> Conn.Pool.init pool, %TextConn{}, pid
+     iex> Conn.Pool.call pid, "GET"
+     {:ok, 0}
+     iex> Conn.call conn, pid, "INC"
+     {:ok, 1}
+     iex> Conn.call conn, pid, "STOP"
+     :ok
+ """
 
   @enforce_keys [:conn]
   defstruct [:conn,
@@ -158,12 +221,16 @@ defprotocol Conn do
 
   ## Returns
 
-    * `{:ok, timeout, conn}`, where `timeout` is the number of milliseconds
-      *suggested* to wait until make any `call/3` on this connection again.
-    * `{:ok, reply, timeout, conn}`, where `reply` is the response data;
+    * `{:ok, timeout | :closed, conn}`, where `timeout` is the number of
+      *milliseconds suggested* to wait until make any `call/3` on this
+      connection again. `:closed` means that connection is closed and there can
+      be no interactions from this moment as any `call/3` will return `{:error,
+      :closed}`;
+    * `{:ok, reply, timeout | :closed, conn}`, where `reply` is the response
+      data;
 
     * `{:error, :closed}` if connection is closed;
-    * `{:error, reason, timeout, conn}` in case of arbitrary error.
+    * `{:error, reason, timeout, conn}`.
 
   ## Examples
 
@@ -180,10 +247,12 @@ defprotocol Conn do
       {:error, :closed}
   """
   @spec call(Conn.t, Conn.method, any)
-        :: {:ok,        0 | pos_integer, Conn.t}
-         | {:ok, reply, 0 | pos_integer, Conn.t}
+        :: {:ok,        0 | pos_integer | :closed, Conn.t}
+         | {:ok, reply, 0 | pos_integer | :closed, Conn.t}
          | {:error, :closed}
-         | {:error, :timeout | reason, 0 | pos_integer, Conn.t}
+         | {:error, :timeout, 0 | pos_integer | :closed, Conn.t}
+         | {:error, :notsupported, 0 | pos_integer | :closed, Conn.t}
+         | {:error, reason, 0 | pos_integer | :closed, Conn.t}
   def call(conn, method, payload \\ nil)
 
 
@@ -220,12 +289,19 @@ defprotocol Conn do
 
 
   @doc """
-  Resource to which interaction is made.
+  Resource is an arbitrary term. Connection represents interaction process with
+  resource.
 
   ## Examples
 
       iex> {:ok, conn1} = Conn.init %Conn.Agent{}, fn -> 42 end
       iex> {:ok, conn2} = Conn.init %Conn.Agent{}, agent: Conn.resource(conn)
+      iex> Conn.resource conn1 == Conn.resource conn2
+      true
+
+      iex> {:ok, agent} = Agent.start_link fn -> 42 end
+      iex> {:ok, conn1} = Conn.init %Conn.Agent{}, agent: agent
+      iex> {:ok, conn2} = Conn.init %Conn.Agent{}, agent: agent
       iex> Conn.resource conn1 == Conn.resource conn2
       true
   """
@@ -246,8 +322,7 @@ defprotocol Conn do
 
   ## Examples
 
-      iex> {:ok, conn} = Conn.init %Conn.Agent{}, fn -> 42 end
-      iex> Conn.methods conn
+      iex> Conn.methods %Conn.Agent{}
       [:get, :get_and_update, :update, :stop]
   """
   @spec methods(Conn.t) :: [method] | {[method], Conn.t}
@@ -263,10 +338,15 @@ defprotocol Conn do
 
   ## Returns
 
-    * On success, `{:ok, {:call, method, payload}, rest of the data}`;
-    * or `{:ok, {:set_auth, auth}, rest}` is returned.
+    On success:
 
-    * On error — `{:error, :notsupported}` if parse is not supported;
+    * `{:ok, {:call, method, payload}, rest of the data}`;
+    * `{:ok, :methods, rest of the data}`;
+
+    On error:
+
+    * `{:error, :notimplemented}` if parse is not implemented;
+
     * `{:error, :notsupported, {{:call, method, data}, rest}}` if method is not
       supported;
 
@@ -276,51 +356,21 @@ defprotocol Conn do
 
   Use `Conn.Defaults` to define function `parse/2` that is always returns
   `{:error, :notsupported}`.
+
+  See example in the head of the module docs.
   """
   @spec parse(Conn.t, data)
-        :: {:ok, {:call, method, data}, rest}
-         | {:ok, {:set_auth, auth}, rest}
+        :: :ok
+         | {:ok, {:call, method, data}, rest}
+         | {:ok, :methods, rest}
 #         | {:ok, {:undo, method, data}, rest}
 
+         | {:error, :notsupported, {:methods, rest}}
          | {:error, :notsupported, {{:call, method, data}, rest}}
-         | {:error, :notsupported}
 
-         | {:error, {:parse, data}}
+         | {:error, {:parse, data}, rest}
          | {:error, :needmoredata}
-
-         | {:error, reason}
-  def parse(conn, data)
-
-  defdelegate warnings(conn), to: Conn.Defaults
-  defdelegate invalid?(conn), to: Conn.Defaults
-  defdelegate healthy?(conn), to: Conn.Defaults
-
-
-  @doc """
-  Connection state for given method of interaction.
-
-  ## Returns
-
-    * `:ready` — ready for given method interaction;
-    * `:invalid` — connection is broken for this method of interaction;
-    * `:closed` — connection is closed, so there can be no interactions;
-    * `:notsupported` — not in the `methods/1` list.
-
-  ## Example
-
-      iex> {:ok, conn} = Conn.init %Conn.Agent{}, fn -> 42 end
-      iex> Conn.state conn, :get
-      :ready
-      iex> Conn.call conn, :stop
-      iex> Conn.state conn, :get
-      :closed
-      iex> for method <- Conn.methods conn,
-      ...> do: Conn.state conn, method
-      [:closed, :closed, :closed, :closed]
-      iex> Conn.state conn, :unknown
-      :notsupported
-  """
-  @spec state(Conn.t, method) :: :ready | :invalid | :closed | :notsupported
-  def state(conn, method)
+         | {:error, :notimplemented | reason}
+  def parse(_conn, data)
 
 end
