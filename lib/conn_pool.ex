@@ -2,29 +2,30 @@ defmodule Conn.Pool do
   use Agent
 
   @moduledoc """
-  Connection pool. If many connections to the same resources exists and could be
-  used concurrently, pool helps storing and sharing them. For example, if there
-  exists remote API accessible via websocket, pool can provide shared access,
-  putting calls to the queue. If connection is closed/expires/became invalid —
-  pool will reinitialize or drop it.
+  Connection pool helps storing, sharing and using connections. It also make it
+  possible to use the same connection concurrently. For example, if there exists
+  remote API accessible via websocket, pool can provide shared access, putting
+  calls to the queue. If connection is closed/expires — pool will reinitialize
+  or drop it and awaiting calls will be moved to another connection queue.
 
-  Start it via `start_link/1` or `start/1`. Add conns via `Conn.Pool.init/3` or
-  `Conn.init/2` → `Conn.put/2` | `Conn.put/3`. Make calls from pool via
-  `Conn.Pool.call/4` or `Conn.Pool.cast/4`.
+  Start pool via `start_link/1` or `start/1`. Add connections via `init/3` or
+  `Conn.init/2` → `put/2` | `put/3`. Make calls from pool via `call/4` or
+  `cast/4`.
 
   In the following examples, `%Conn.Agent{}` represents connection to some
   `Agent` that can be created separately or via `Conn.init/2`. Available methods
-  of interaction are `:get, :get_and_update, :update` and `:stop` (see
-  `Conn.methods/1`). This conns means to exist only as an example for doctests.
-  More meaningful example would be `%Conn.Plug{}`, that is a wrapper.
+  of interaction with `Agent` are `:get`, `:get_and_update`, `:update` and
+  `:stop` (see `Conn.methods/1`). This type of connection means to exist only as
+  an example for doctests. More meaningful example would be `%Conn.Plug{}`, that
+  is a wrapper. Also, see `Conn` docs for detailed example on `Conn` protocol
+  implementation and using.
 
       iex> pool = Conn.Pool.start()
       iex> conn = Conn.init %Conn.Agent{}, fn -> 42 end
-      iex> Agent.get Conn.resource(conn), & &1
+      iex> Agent.get Conn.resource(conn), & &1 # here `Conn.resource(conn)` is the agent pid
       42
-      # — resource for `conn` is the agent
       #
-      iex> Conn.Pool.put pool, conn, type: :agent
+      iex> id = Conn.Pool.put pool, conn, type: :agent
       iex> agent = Conn.resource conn
       iex> Conn.Pool.call pool, agent, :get, & &1
       {:ok, 42}
@@ -35,27 +36,35 @@ defmodule Conn.Pool do
       {:error, :method}
       iex> Conn.Pool.call pool, :some_res, :some_method
       {:error, :resource}
+      iex> (Conn.Pool.info pool, id).extra
+      [type: :agent]
+      #
       iex> Conn.Pool.call pool, agent, :stop
       :ok
-      # this conn is closed and will be dropped by pool
+      # this conn is `:closed` and will be dropped by pool
       iex> Conn.Pool.call pool, agent, :get, & &1
       {:error, :resource}
+      iex> Conn.Pool.info pool, id
+      :error
+
+  In the above example connection will not be reinitialized, because it was
+  added to pool via `put/3`. In the following example
 
   Also, `pop/2` could be used to pop `%Conn{}` struct from pool (after all calls
   in the queue are fulfilled).
 
       iex> pool = Conn.Pool.start_link()
-      iex> conn = Conn.init %Conn.Agent{}, fn -> 42 end
-      iex> id = Conn.Pool.put pool, conn, type: :agent
-      iex> Conn.Pool.call pool, Conn.resource(conn), :get, & &1
+      iex> id = Conn.Pool.init pool, %Conn.Agent{}, fn -> 42 end
+      iex> info = Conn.Pool.pop pool, id
+      iex> put_in 
+      iex> Conn.Pool.put
+      iex> Conn.Pool.call pool, Conn.resource(info.conn), :get, & &1
       {:ok, 42}
       #
-      iex> struct = Conn.Pool.pop pool, id
-      iex> struct.conn == conn
-      true
-      #
-      iex> Conn.Pool.call pool, Conn.resource(conn), :unknown_method
-      {:error, :unknownres}
+      iex> Conn.Pool.call pool, Conn.resource(info.conn), :some_method
+      {:error, :method}
+      iex> Conn.Pool.call pool, Conn.resource(info.conn), :some_method
+      {:error, :method}
       # as conn was deleted
       iex> struct.tags
       [type: :agent]
