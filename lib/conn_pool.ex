@@ -74,8 +74,8 @@ defmodule Conn.Pool do
       true
       # `Conn.init/2` suggests to never reinitialize again (`:infinity` timeout)
       # so pool will just drop this conn
-      iex> Conn.Pool.empty? pool
-      true
+      iex> Conn.Pool.resources pool
+      []
 
   ## Name registration
 
@@ -116,10 +116,10 @@ defmodule Conn.Pool do
   ## Returns
 
     * `{:ok, id}` in case of `Conn.init/2` returns `{:ok, conn}`, where `id` is
-      the identifier that can be used to refer given conn;
+      the identifier that can be used to refer `conn`;
     * `{:error, :timeout}` if `Conn.init/2` returns `{:ok, :timeout}` or
       initialization spended more than `%Conn{}.init_timeout` ms.
-    * `{:error, :methods}` if `Conn.methods/1` returns `:error.
+    * `{:error, :methods}` if `Conn.methods/1` returns `:error`.
     * `{:error, reason}` in case `Conn.init/2` returns arbitrary error.
   """
 
@@ -135,6 +135,7 @@ defmodule Conn.Pool do
     end
     case Task.yield(task, info.init_timeout) || Task.shutdown task do
       {:ok, {:ok, conn}} ->
+        info = %{info | conn: conn}
         put pool, Map.put_new(info, :init_args, init_args)
       {:ok, err} ->
         err
@@ -191,10 +192,10 @@ defmodule Conn.Pool do
     case Task.yield(task, info.init_timeout) || Task.shutdown task do
       {:ok, {methods, conn}} ->
         {:ok, GenServer.call(pool, {:put, %{info | methods: methods, conn: conn}})}
-      {:ok, methods} ->
-        {:ok, GenServer.call(pool, {:put, %{info | methods: methods}})}
       {:ok, :error} ->
         {:error, :methods}
+      {:ok, methods} ->
+        {:ok, GenServer.call(pool, {:put, %{info | methods: methods}})}
       nil ->
         {:error, :timeout}
     end
@@ -214,26 +215,58 @@ defmodule Conn.Pool do
 
   ## Example
 
-    First, see `put/2`.
-
-      iex> pool = Conns.Pool.start_link()
-      iex> id = Conns.Pool.init pool, %Conn.Agent{}, fn -> 42 end
-      iex> Conns.Pool.tags pool, id, type: :agent
-      nil
-      iex> {:ok, struct} = Conns.Pool.pop pool, id
-      iex> struct.tags
-      [type: agent]
-      iex> Conns.Pool.pop pool, id
+      iex> {:ok, pool} = Conn.Pool.start_link()
+      iex> {:ok, agent} = Agent.start_link fn -> 42 end
+      iex> {:ok, id} = Conn.Pool.init pool, %Conn.Agent{}, res: agent
+      iex> %Conn{conn: c} = Conn.Pool.pop pool, id
+      iex> Agent.get Conn.resource(c), & &1
+      42
+      iex> Conn.Pool.pop pool, id
       :error
+      iex> {:ok, id1} = Conn.Pool.init pool, %Conn.Agent{}, res: agent
+      iex> {:ok, id2} = Conn.Pool.init pool, %Conn.Agent{}, res: agent
+      iex> {:ok, id3} = Conn.Pool.init pool, %Conn.Agent{}, res: agent
+      iex> Conn.Pool.extra pool, id1, :takeme
+      nil
+      iex> Conn.Pool.extra pool, id3, :takeme
+      iex> [info1, info3] = Conn.Pool.pop pool, fn
+      ...>   %{extra: :takeme} -> true
+      ...>   _ -> false
+      ...> end
+      iex> Conn.Pool.empty? pool, agent
+      false
+      iex> Conn.Pool.pop pool, id2
+      iex> Conn.Pool.empty? pool, agent
+      true
 
-  This method could be used to make advanced tune of the conn added to pool.
+  Also, see example for `put/2`.
   """
   @spec pop(Conn.Pool.t, Conn.id) :: {:ok, conn_info} | :error
-  @spec pop(Conn.Pool.t, filter) :: [conn_info]
-  @spec pop(Conn.Pool.t, resource, filter) :: [conn_info]
   def pop(pool, id) do
     GenServer.call pool, {:pop, id}, :infinity
   end
+
+  @doc """
+  Pop conns to `resource` that satisfy `filter`.
+  """
+  @spec pop(Conn.Pool.t, Conn.resource, (conn_info -> boolean)) :: [conn_info]
+  def pop(pool, resource, filter) do
+    GenServer.call pool, {:pop, resource, filter}, :infinity
+  end
+
+
+  @doc """
+  Is there exists conns to given `resource`?
+  """
+  @spec empty?(Conn.Pool.t, Conn.resource) :: boolean
+  def empty?(pool, resource), do: :TODO
+
+
+  @doc """
+  Is there exists conns to given `resource`?
+  """
+  @spec empty?(Conn.Pool.t, Conn.resource) :: boolean
+  def resources(pool), do: GenServer.call pool, :resources
 
 
   @doc """
@@ -273,10 +306,10 @@ defmodule Conn.Pool do
         :: :ok | {:ok, Conn.reply} | {:error, :resource | :method | :timeout | reason}
   @spec call( Conn.Pool.t, Conn.resource, Conn.method, filter, any)
         :: :ok | {:ok, Conn.reply} | {:error, :resource | :method | :filter | :timeout | reason}
-  def call( pool, resource, method, payload \\ nil) do
-    GenServer.call pool, {:call, resource, method, fn _ -> true end, payload}
+  def call(pool, resource, method, payload \\ nil) do
+    call pool, resource, method, fn _ -> true end, payload
   end
-  def call( pool, resource, method, filter, payload) do
+  def call(pool, resource, method, filter, payload) do
     GenServer.call pool, {:call, resource, method, filter, payload}
   end
 
@@ -291,14 +324,14 @@ defmodule Conn.Pool do
 
   See `call/4` for details.
   """
-  @spec cast( Conn.Pool.t, Conn.resource, Conn.method, any)
+  @spec cast(Conn.Pool.t, Conn.resource, Conn.method, any)
         :: :ok | {:error, :resource | :method}
-  @spec cast( Conn.Pool.t, Conn.resource, Conn.method, filter, any)
+  @spec cast(Conn.Pool.t, Conn.resource, Conn.method, filter, any)
         :: :ok | {:error, :resource | :method | :filter}
-  def cast( pool, resource, method, payload \\ nil) do
-    GenServer.call pool, {:cast, resource, method, fn _ -> true end, payload}
+  def cast(pool, resource, method, payload \\ nil) do
+    cast pool, resource, method, fn _ -> true end, payload
   end
-  def cast( pool, resource, method, filter, payload) do
+  def cast(pool, resource, method, filter, payload) do
     GenServer.call pool, {:cast, resource, method, filter, payload}
   end
 
@@ -311,7 +344,7 @@ defmodule Conn.Pool do
 
   ## Example
 
-      iex> pool = Conn.Pool.start_link()
+      iex> {:ok, pool} = Conn.Pool.start_link()
       iex> {:ok, agent} = Agent.start fn -> 42 end
       iex> {:ok, id} = Conn.Pool.init pool, %Conn.Agent{}, res: agent
       iex> Conn.Pool.extra pool, id, :extra
@@ -331,6 +364,7 @@ defmodule Conn.Pool do
       # but:
       iex> Conn.Pool.call pool, agent, :get, fn
       ...>   %Conn{extra: :some} -> true
+      ...>   _ -> false
       ...> end, & &1
       {:ok, 42}
   """

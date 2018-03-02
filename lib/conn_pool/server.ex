@@ -10,8 +10,8 @@ defmodule Conns.Pool.Server do
   defp gen_id(), do: System.system_time()
 
 
-  #                       resources,      conns
-  def init(_), do: {:ok, {AgentMap.new(), AgentMap.new()}}
+                         #      resources,      conns
+  def init(penalty), do: {:ok, {AgentMap.new(), AgentMap.new()}}
 
   def handle_call({:put, conn, extra, init_args}, _f, {resources, conns}=state) do
     conn = %Conn{conn: conn,

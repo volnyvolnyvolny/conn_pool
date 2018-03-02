@@ -194,8 +194,8 @@ defprotocol Conn do
              :init_args,
              :extra,
              :expires,
+             :methods,
 
-             methods: [],
              revive: false,
 
              stats: %{},
