@@ -10,15 +10,8 @@ defmodule Conns.Pool.Server do
   defp gen_id(), do: System.system_time()
 
 
-  def init(penalty) do
-   :rand.seed(:exsp)
-
-    Process.put :'$penalty', penalty || [50, 100, 500, 1000, 2000, 5000]
-
-    #      resources,      conns
-    {:ok, {AgentMap.new(), AgentMap.new()}}
-  end
-
+  #                       resources,      conns
+  def init(_), do: {:ok, {AgentMap.new(), AgentMap.new()}}
 
   def handle_call({:put, conn, extra, init_args}, _f, {resources, conns}=state) do
     conn = %Conn{conn: conn,

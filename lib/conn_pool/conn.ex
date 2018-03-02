@@ -56,13 +56,13 @@ defprotocol Conn do
   `COMMAND` with given `ARGS` or without them. There is a special command
   `:COMMANDS;` that returns available commands;
 
-  Server may reply with `ok:COMMAND1,CMD2,…`, `ok`, `ok:DATA` or `err:REASON`,
-  where `REASON` could be `notsupported` (command), `parse`, `badarg`, or any
-  other.
+  Server is the process that may reply with `ok:COMMAND1,CMD2,…`, `ok`,
+  `ok:DATA` or `err:REASON`, where `REASON` could be `notsupported` (command),
+  `badarg`, `parse`, or any other.
 
   Now simple test conn will look like:
 
-      defmodule TextConn, do: defstruct [:res, :commands]
+      defmodule TextConn, do: defstruct [:res]
 
   Let's implement protocol described above:
 
@@ -73,7 +73,7 @@ defprotocol Conn do
             {_, conn} = Conn.methods conn # take available methods
             {:ok, %{conn | res: pid}}
           else
-            {:error, :deadproc}
+            {:error, :dead, :infinity, conn} # take available methods
           end
         end
 
@@ -85,14 +85,13 @@ defprotocol Conn do
           else
             send pid, {self(), ":COMMANDS;"}
             receive do
-              "ok:"<>cmds -> cmds = String.split ","
-                             {cmds, %{conn | commands: cmds}}
-              after 5000 -> :error
+              "ok:"<>cmds -> String.split ","
+            # after 5000 -> :error # no need, pool will handle this
             end
           end
         end
 
-        def call(%_{res: pid, commands: cs}=c, cmd, args\\\\"") when cmd in cs do
+        def call(%_{res: pid}=c, cmd, args \\\\ "") do
           unless Process.alive? pid do
             {:error, :closed}
           else
@@ -109,7 +108,6 @@ defprotocol Conn do
             end
           end
         end
-        def call(%_{res: pid}=c, _cmd, _args), do: {:error, :notsupported, 50, c}
 
   — it's the part of the implementation used on the client side, and now
   parsing:
@@ -163,7 +161,7 @@ defprotocol Conn do
       ...>              send pid, "err:notsupported"
       ...>              loop rest, state
       ...>           {:ok, {:call, _, _},_rest} ->
-      ...>              send pid, "err:badargs"
+      ...>              send pid, "err:badarg"
       ...>              loop rest, state
       ...>         end
       ...>     end
@@ -172,16 +170,16 @@ defprotocol Conn do
       ...>
       ...>
       iex> pid = spawn_link fn -> Server.loop "" end
-      iex> pool = Conn.Pool.start_link()
+      iex> {:ok, pool} = Conn.Pool.start_link()
       iex> Conn.Pool.init pool, %TextConn{}, pid
-      iex> Conn.Pool.call pid, "GET"
+      iex> Conn.Pool.call pool, pid, "GET"
       {:ok, 0}
       iex> Conn.Pool.call pool, pid, "INC"
       {:ok, 1}
       iex> Conn.Pool.call pool, pid, "DEC"
       {:error, :notsupported}
-      iex> Conn.Pool.call pool, pid, "INC", :some_args
-      {:error, "badargs"}
+      iex> Conn.Pool.call pool, pid, "INC", :badarg
+      {:error, "badarg"}
       iex> Conn.Pool.call pool, pid, "STOP"
       :ok
       iex> Conn.Pool.call pool, pid, "GET"
@@ -196,15 +194,15 @@ defprotocol Conn do
              :init_args,
              :extra,
              :expires,
-             :penalties,
 
              methods: [],
-             reinit: false,
+             revive: false,
 
              stats: %{},
 
+             init_timeout: 5000, # ms
              last_call: System.system_time(),
-             timeout: 0, penalty: 0]
+             timeout: 0]
 
 
   @type  t :: term
@@ -224,16 +222,19 @@ defprotocol Conn do
   ## Returns
 
     * `{:ok, conn}` in case of successful initialization.
-    * `{:error, reason, retry after ms, conn}` in case initialization failed. If
-      timeout value is `0`, it is suggested to repeat `init/2` call immediately;
-      if it's > `0`, suggested to wait given amount of ms, and if it's
-      `:infinity`, `init/2` call should never be repeated.
+
+    * `{:error, reason, 0 ms, conn}` in case initialization failed with reason
+    `reason`, suggested to repeat `init/2` call immediately.
+    * `{:error, reason, T ms, conn}` in case initialization failed with reason
+    `reason`, suggested to repeat `init/2` call after `T` milliseconds;
+    * `{:error, reason, :infinity, conn}` in case initialization failed with
+    reason `reason`, suggested to never repeat `init/2` call.
 
   ## Examples
 
       iex> {:ok, conn1} = Conn.init %Conn.Agent{}, fn -> 42 end
-      iex> {:ok, conn2} = Conn.init %Conn.Agent{}, agent: Conn.resource(conn1)
-      iex> Conn.resource(conn1) == Conn.resource(conn2)
+      iex> {:ok, conn2} = Conn.init %Conn.Agent{}, res: Conn.resource conn1
+      iex> Conn.resource conn1 == Conn.resource conn2
       true
   """
   @spec init(Conn.t, init_args)
@@ -247,15 +248,16 @@ defprotocol Conn do
 
   ## Returns
 
-    * `{:ok, timeout | :closed, conn}`, where `timeout` is the number of
-      *milliseconds suggested* to wait until make any `call/3` again. `:closed`
-      means that connection is closed and there can be no interactions from
-      this moment as any `call/3` will return `{:error, :closed}`;
+    * `{:ok, timeout | :closed, conn}` if call succeed and *suggested* to wait
+      `timeout` ms until use `conn` again. `:closed` or `:infinity` means that
+      connection is closed and there can be no interactions from this moment as
+      any `call/3` will return `{:error, :closed}`;
+
     * `{:ok, reply, timeout | :closed, conn}`, where `reply` is the response
       data;
 
     * `{:error, :closed}` if connection is closed;
-    * `{:error, reason, timeout, conn}`.
+    * `{:error, reason, timeout | :closed, conn}`.
 
   ## Examples
 
@@ -269,12 +271,12 @@ defprotocol Conn do
       {:error, :closed}
   """
   @spec call(Conn.t, Conn.method, any)
-        :: {:ok,        0 | pos_integer | :closed, Conn.t}
-         | {:ok, reply, 0 | pos_integer | :closed, Conn.t}
+        :: {:ok,        0 | pos_integer | :infinity | :closed, Conn.t}
+         | {:ok, reply, 0 | pos_integer | :infinity |:closed, Conn.t}
          | {:error, :closed}
-         | {:error, :timeout,      0 | pos_integer | :closed, Conn.t}
-         | {:error, :notsupported, 0 | pos_integer | :closed, Conn.t}
-         | {:error, reason,        0 | pos_integer | :closed, Conn.t}
+         | {:error, :timeout,      0 | pos_integer | :infinity | :closed, Conn.t}
+         | {:error, :notsupported, 0 | pos_integer | :infinity | :closed, Conn.t}
+         | {:error, reason,        0 | pos_integer | :infinity | :closed, Conn.t}
   def call(conn, method, payload \\ nil)
 
 
@@ -311,19 +313,19 @@ defprotocol Conn do
 
 
   @doc """
-  Resource is an arbitrary term. Most it is some pid. Connection represents
+  Resource is an arbitrary term. Mostly it is some pid. Connection represents
   interaction with resource.
 
   ## Examples
 
       iex> {:ok, conn1} = Conn.init %Conn.Agent{}, fn -> 42 end
-      iex> {:ok, conn2} = Conn.init %Conn.Agent{}, agent: Conn.resource(conn)
+      iex> {:ok, conn2} = Conn.init %Conn.Agent{}, res: Conn.resource conn
       iex> Conn.resource conn1 == Conn.resource conn2
       true
 
       iex> {:ok, agent} = Agent.start_link fn -> 42 end
-      iex> {:ok, conn1} = Conn.init %Conn.Agent{}, agent: agent
-      iex> {:ok, conn2} = Conn.init %Conn.Agent{}, agent: agent
+      iex> {:ok, conn1} = Conn.init %Conn.Agent{}, res: agent
+      iex> {:ok, conn2} = Conn.init %Conn.Agent{}, res: agent
       iex> Conn.resource conn1 == Conn.resource conn2
       true
   """
