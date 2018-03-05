@@ -258,6 +258,39 @@ defmodule Conn.Pool do
   @doc """
   Is there exists conns to given `resource`?
   """
+  @spec map(Conn.Pool.t, Conn.resource, (conn_info -> any)) :: [any]
+  def map(pool, resource, fun), do: :TODO
+
+
+  @doc """
+  Update every conn to resource with `fun`.
+  This function always returns `:ok`.
+
+  ## Example
+
+      iex> {:ok, pool} = Conn.Pool.start_link()
+      iex> {:ok, agent} = Agent.start fn -> 42 end
+      iex> Conn.Pool.init pool, %Conn.Agent{}, res: agent
+      iex> Conn.Pool.init pool, %Conn.Agent{}, res: agent
+      iex> Conn.Pool.call pool, agent, :get, fn conn ->
+      ...>   conn.extra == :extra
+      ...> end, & &1
+      {:error, :filter}
+      #
+      iex> Conn.Pool.update pool, agent, conn -> %Conn{conn: conn, extra: :extra}
+      :ok
+      iex> Conn.Pool.call pool, agent, :get, fn conn ->
+      ...>   conn.extra == :extra
+      ...> end, & &1
+      42
+  """
+  @spec update(Conn.Pool.t, Conn.resource, (conn_info -> conn_info)) :: :ok
+  def update(pool, resource, fun), do: :TODO
+
+
+  @doc """
+  Is there exists conns to given `resource`?
+  """
   @spec empty?(Conn.Pool.t, Conn.resource) :: boolean
   def empty?(pool, resource), do: :TODO
 
@@ -371,5 +404,25 @@ defmodule Conn.Pool do
   @spec extra(Conn.Pool.t, id, any) :: {:ok, any} | :error
   def extra(pool, id, extra) do
     GenServer.call pool, {:extra, id, extra}
+  end
+
+
+  @doc """
+  Pool stores connections wraped in `%Conn{}`. Using this method this structs
+  could be retrived.
+
+  ## Example
+
+      iex> {:ok, pool} = Conn.Pool.start_link()
+      iex> {:ok, id} = Conn.Pool.init pool, %Conn.Agent{}, fn -> 42 end
+      iex> (Conn.Pool.info pool, id).extra
+      nil
+      iex> Conn.Pool.extra pool, id, :extra
+      iex> (Conn.Pool.info pool, id).extra
+      :extra
+  """
+  @spec info(Conn.Pool.t, id) :: %Conn{}
+  def info(pool, id) do
+    GenServer.call pool, {:info, id}
   end
 end
