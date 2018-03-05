@@ -94,7 +94,7 @@ defmodule Conn.Pool do
   """
   @spec start_link(GenServer.options) :: GenServer.on_start
   def start_link(opts) do
-    GenServer.start_link __MODULE__.Server, nil, opts
+    AgentMap.start_link [conns: AgentMap.new(), resource: %{}] ++ opts
   end
 
 
@@ -103,7 +103,7 @@ defmodule Conn.Pool do
   """
   @spec start(GenServer.options) :: GenServer.on_start
   def start(opts) do
-    GenServer.start __MODULE__.Server, nil, opts
+    AgentMap.start [conns: AgentMap.new(), resource: %{}] ++ opts
   end
 
   @doc """
@@ -203,10 +203,10 @@ defmodule Conn.Pool do
 
 
   @doc """
-  Pop `%Conn{}` that wraps connection with given `id` from pool.
+  Works as `info/2`, but also deletes connection.
 
-  Conn is returned only after all calls in the corresponding queue are
-  fulfilled.
+  Connection wrapper is returned only after all calls in the corresponding queue
+  are fulfilled.
 
   ## Returns
 
