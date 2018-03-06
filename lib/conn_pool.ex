@@ -86,8 +86,12 @@ defmodule Conn.Pool do
   @type  t :: GenServer.t
   @type  id :: pos_integer
   @type  reason :: any
-  @type  filter :: (%Conn{} -> boolean | non_neg_integer | nil)
+  @type  filter :: (conn_info -> as_boolean(term()))
   @type  conn_info :: %Conn{}
+
+  # Generate uniq id
+  defp gen_id(), do: System.system_time()
+
 
   @doc """
   Starts pool as a linked process.
@@ -106,6 +110,7 @@ defmodule Conn.Pool do
     AgentMap.start [conns: AgentMap.new(), resource: %{}] ++ opts
   end
 
+
   @doc """
   Initialize connection in a separate `Task` and use `put/2` to add connection
   that is wrapped in `%Conn{}`.
@@ -123,13 +128,13 @@ defmodule Conn.Pool do
     * `{:error, reason}` in case `Conn.init/2` returns arbitrary error.
   """
 
-  @spec init( Conn.Pool.t, Conn.t, any)
+  @spec init(Conn.Pool.t, Conn.t, any)
         :: {:ok, id} | {:error, :timeout | :methods | reason}
-  @spec init( Conn.Pool.t, conn_info, any)
+  @spec init(Conn.Pool.t, conn_info, any)
         :: {:ok, id} | {:error, :timeout | :methods | reason}
 
-  def init( pool, info_or_conn, init_args \\ nil)
-  def init( pool, %Conn{conn: conn}=info, init_args) do
+  def init(pool, info_or_conn, init_args \\ nil)
+  def init(pool, %Conn{conn: conn}=info, init_args) do
     task = Task.async fn ->
       Conn.init conn, init_args
     end
@@ -143,10 +148,29 @@ defmodule Conn.Pool do
         {:error, :timeout, 0, conn}
     end
   end
-  def init( pool, conn, init_args) do
+  def init(pool, conn, init_args) do
     init pool, %Conn{conn: conn}, init_args
   end
 
+
+  # add conn to pool
+  defp add(pool, methods, conn) do
+    info = %{info | methods: methods, conn: conn}
+    id = gen_id()
+
+    conns = AgentMap.get pool, :conns, & &1
+    AgentMap.put conns, id, info
+
+    AgentMap.update pool, :resources, fn resources ->
+      res = Conn.resource conn
+      if resources[res] do
+        update_in resources[res], & [id|&1]
+      else
+        put_in resources[res], [id]
+      end
+    end
+    id
+  end
 
   @doc """
   Adds given `%Conn{}` to pool, returning id to refer `info.conn` in future.
@@ -191,11 +215,11 @@ defmodule Conn.Pool do
     end
     case Task.yield(task, info.init_timeout) || Task.shutdown task do
       {:ok, {methods, conn}} ->
-        {:ok, GenServer.call(pool, {:put, %{info | methods: methods, conn: conn}})}
+        {:ok, add(pool, methods, conn)}
       {:ok, :error} ->
         {:error, :methods}
       {:ok, methods} ->
-        {:ok, GenServer.call(pool, {:put, %{info | methods: methods}})}
+        {:ok, add(pool, methods, conn)}
       nil ->
         {:error, :timeout}
     end
@@ -243,7 +267,16 @@ defmodule Conn.Pool do
   """
   @spec pop(Conn.Pool.t, Conn.id) :: {:ok, conn_info} | :error
   def pop(pool, id) do
-    GenServer.call pool, {:pop, id}, :infinity
+    conns = AgentMap.fetch pool, :conns
+    case AgentMap.pop conns, id, :error do
+      :error -> :error
+      conn ->
+        AgentMap.update pool, :resources, fn resources ->
+          res = Conn.resource conn
+          update_in resources[res], & List.delete id
+        end
+        {:ok, conn}
+    end
   end
 
   @doc """
@@ -251,15 +284,39 @@ defmodule Conn.Pool do
   """
   @spec pop(Conn.Pool.t, Conn.resource, (conn_info -> boolean)) :: [conn_info]
   def pop(pool, resource, filter) do
-    GenServer.call pool, {:pop, resource, filter}, :infinity
+    conns = AgentMap.get pool, :conns, & &1
+    resources = AgentMap.get pool, :resources, & &1
+    ids = resources[resource]
+
+    if ids do
+      for id <- ids,
+          conn = conns[id],
+          filter.(conn) do
+        pop pool, id
+      end
+    else
+      []
+    end
   end
 
 
   @doc """
-  Is there exists conns to given `resource`?
+  Apply given `fun` to every conn to `resource`. Returning list of results.
   """
   @spec map(Conn.Pool.t, Conn.resource, (conn_info -> any)) :: [any]
-  def map(pool, resource, fun), do: :TODO
+  def map(pool, resource, fun) do
+    conns = AgentMap.get pool, :conns, & &1
+    resources = AgentMap.get pool, :resources, & &1
+    ids = resources[resource]
+
+    if ids do
+      for id <- ids do
+        fun.(conns[id])
+      end
+    else
+      []
+    end
+  end
 
 
   @doc """
@@ -285,35 +342,90 @@ defmodule Conn.Pool do
       42
   """
   @spec update(Conn.Pool.t, Conn.resource, (conn_info -> conn_info)) :: :ok
-  def update(pool, resource, fun), do: :TODO
+  def update(pool, resource, fun) do
+    conns = AgentMap.get pool, :conns, & &1
+    resources = AgentMap.get pool, :resources, & &1
+    ids = resources[resource]
+
+    if ids do
+      for id <- ids do
+        AgentMap.update conns, id, fun
+      end
+    end
+    :ok
+  end
+
+
+  @doc """
+  Is pool has conns to given `resource`?
+  """
+  @spec empty?(Conn.Pool.t, Conn.resource) :: boolean
+  def empty?(pool, resource) do
+    resources = AgentMap.get pool, :resources, & &1
+    resources[resource] && true || false # :)
+  end
 
 
   @doc """
   Is there exists conns to given `resource`?
   """
-  @spec empty?(Conn.Pool.t, Conn.resource) :: boolean
-  def empty?(pool, resource), do: :TODO
+  @spec resources(Conn.Pool.t, Conn.resource) :: [Conn.resource]
+  def resources(pool) do
+    resources = AgentMap.get pool, :resources, & &1
+    Map.keys resources
+  end
 
 
-  @doc """
-  Is there exists conns to given `resource`?
-  """
-  @spec empty?(Conn.Pool.t, Conn.resource) :: boolean
-  def resources(pool), do: GenServer.call pool, :resources
+  # time to wait
+  defp ttw(info) do
+    {sum, n} = Enum.reduce info.stats, {0,0}, fn
+      {key, {avg, num}}, {sum,n} ->
+        {sum + avg*num, n+num}
+    end
+
+    sum / n + info.timeout
+  end
+
+  defp filter(pool, resource, method, filter) do
+    conns = AgentMap.get pool, :conns, & &1
+    resources = AgentMap.get pool, :resources, & &1
+    ids = resources[resource]
+
+    if ids do
+      ids_and_infos = for
+        id <- ids,
+        info = conns[id],
+        method in info.methods do
+        {id, info}
+      end
+
+      if ids_and_infos == [] do
+        {:error, :method}
+      else
+        ids = for {id, info} <- ids_and_infos,
+          p = filter.(info),
+          p do
+            id
+        end
+
+        if ids == [] do
+          {:error, :filter}
+        else
+          {:ok, ids}
+        end
+      end
+    else
+      {:error, :resource}
+    end
+  end
 
 
   @doc """
   Select one of the connections to given `resource` and make `Conn.call/3` via
   given `method` of interaction.
 
-  Optional `filter` param could be provided in form of `(%Conn{} -> boolean |
-  priority | nil)` callback, where `priority` is a `non_neg_integer`. Callback
-  may return
-
-    * `false | nil`, specifying that conn cannot be used;
-    * `true`, means that conn is `preferred` to use;
-    * `p ≥ 0`, means that if conns for which `true` returns are unavailable,
-      conns with `p == 0` will be used and so on…
+  Optional `filter` param could be provided in form of `(%Conn{} ->
+  as_boolean(term()))` callback.
 
   Pool respects refresh timeout value returned by `Conn.call/3`. After each call
   `:timeout` field of the corresponding `%Conn{}` struct is rewrited.
@@ -335,15 +447,60 @@ defmodule Conn.Pool do
 
     * `{:ok, reply} | :ok` in case of success.
   """
-  @spec call( Conn.Pool.t, Conn.resource, Conn.method, any)
+  @spec call(Conn.Pool.t, Conn.resource, Conn.method, any)
         :: :ok | {:ok, Conn.reply} | {:error, :resource | :method | :timeout | reason}
-  @spec call( Conn.Pool.t, Conn.resource, Conn.method, filter, any)
+  @spec call(Conn.Pool.t, Conn.resource, Conn.method, filter, any)
         :: :ok | {:ok, Conn.reply} | {:error, :resource | :method | :filter | :timeout | reason}
   def call(pool, resource, method, payload \\ nil) do
     call pool, resource, method, fn _ -> true end, payload
   end
   def call(pool, resource, method, filter, payload) do
-    GenServer.call pool, {:call, resource, method, filter, payload}
+    conns = AgentMap.get pool, :conns, & &1
+    resources = AgentMap.get pool, :resources, & &1
+
+    with {:ok, ids} <- filter(pool, resource, method, filter) do
+      id = Enum.min_by ids, fn id ->
+        ttw conns[id]
+      end
+
+      AgentMap.get_and_update conns, id, fn info ->
+        start = System.system_time()
+        if info.timeout > 100 do
+          case filter(pool, resource, method, filter) do
+            {:ok, ids} ->
+            err ->
+              err
+          end
+          Enum.min_by ids, fn id ->
+            ttw conns[id]
+          end
+        else
+          case Conn.call info.conn, method, payload do
+            {:ok, timeout, conn} ->
+              stop = System.system_time()
+              info = update_in info.stats[method], fn
+                nil -> {stop-start, 1}
+                {avg, num} -> {(avg*num+stop-start)/(num+1), num+1}
+              end
+              info = %{info | timeout: timeout, conn: conn}
+              {:ok, info}
+
+            {:ok, reply, timeout, conn} ->
+              stop = System.system_time()
+              info = update_in info.stats[method], fn
+                nil -> {stop-start, 1}
+                {avg, num} -> {(avg*num+stop-start)/(num+1), num+1}
+              end
+              info = %{info | timeout: timeout, conn: conn}
+              {{:ok, reply}, info}
+
+            {:error, }
+          end
+        end
+      end
+    else
+      err -> err
+    end
   end
 
 

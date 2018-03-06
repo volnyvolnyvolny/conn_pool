@@ -272,7 +272,7 @@ defprotocol Conn do
   """
   @spec call(Conn.t, Conn.method, any)
         :: {:ok,        0 | pos_integer | :infinity | :closed, Conn.t}
-         | {:ok, reply, 0 | pos_integer | :infinity |:closed, Conn.t}
+         | {:ok, reply, 0 | pos_integer | :infinity | :closed, Conn.t}
          | {:error, :closed}
          | {:error, :timeout,      0 | pos_integer | :infinity | :closed, Conn.t}
          | {:error, :notsupported, 0 | pos_integer | :infinity | :closed, Conn.t}
