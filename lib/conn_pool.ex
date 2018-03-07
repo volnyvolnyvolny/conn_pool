@@ -226,6 +226,20 @@ defmodule Conn.Pool do
   end
 
 
+  defp delete(pool, id) do
+    AgentMap.update pool, :resources, fn resources ->
+      res = Conn.resource conn
+      if resources[res] do
+        update_in resources[res], &List.delete &1, id
+      else
+        resources
+      end
+    end
+
+    AgentMap.fetch(pool, :conns) |> AgentMap.delete(id)
+  end
+
+
   @doc """
   Works as `info/2`, but also deletes connection.
 
@@ -267,15 +281,19 @@ defmodule Conn.Pool do
   """
   @spec pop(Conn.Pool.t, Conn.id) :: {:ok, conn_info} | :error
   def pop(pool, id) do
+    AgentMap.update pool, :resources, fn resources ->
+      res = Conn.resource conn
+      if resources[res] do
+        update_in resources[res], &List.delete &1, id
+      else
+        resources
+      end
+    end
+
     conns = AgentMap.fetch pool, :conns
     case AgentMap.pop conns, id, :error do
       :error -> :error
-      conn ->
-        AgentMap.update pool, :resources, fn resources ->
-          res = Conn.resource conn
-          update_in resources[res], & List.delete id
-        end
-        {:ok, conn}
+      conn -> {:ok, conn}
     end
   end
 
@@ -420,6 +438,11 @@ defmodule Conn.Pool do
   end
 
 
+  defp transfer(pool, resource, method, filter, payload) do
+    
+  end
+
+
   @doc """
   Select one of the connections to given `resource` and make `Conn.call/3` via
   given `method` of interaction.
@@ -459,42 +482,100 @@ defmodule Conn.Pool do
     resources = AgentMap.get pool, :resources, & &1
 
     with {:ok, ids} <- filter(pool, resource, method, filter) do
+      # select the best conn:
       id = Enum.min_by ids, fn id ->
         ttw conns[id]
       end
 
-      AgentMap.get_and_update conns, id, fn info ->
-        start = System.system_time()
-        if info.timeout > 100 do
-          case filter(pool, resource, method, filter) do
-            {:ok, ids} ->
-            err ->
-              err
+      AgentMap.get_and_update conns, id, fn
+        nil ->
+          reply = call pool, resource, method, filter, payload
+          {reply, nil}
+        info ->
+          start = System.system_time()
+          ttw = ((info.last_call + info.timeout) - start)
+                |> Process.sleep(:native, :milliseconds)
+
+          if ttw < 50 do
+            Process.sleep(if ttw < 0, do: 0, else: ttw)
+
+            case Conn.call info.conn, method, payload do
+              {:ok, :closed, conn} ->
+                delete pool, id
+                {:ok, nil}
+              {:ok, reply, :closed, conn} ->
+                delete pool, id
+                {{:ok, reply}, nil}
+
+              {:ok, timeout, conn} ->
+                stop = System.system_time()
+                info = update_in info.stats[method], fn
+                  nil -> {stop-start, 1}
+                  {avg, num} -> {(avg*num+stop-start)/(num+1), num+1}
+                end
+                info = %{info | conn: conn, timeout: timeout}
+                {:ok, info}
+              {:ok, reply, timeout, conn} ->
+                stop = System.system_time()
+                info = update_in info.stats[method], fn
+                  nil -> {stop-start, 1}
+                  {avg, num} -> {(avg*num+stop-start)/(num+1), num+1}
+                end
+                info = %{info | conn: conn, timeout: timeout}
+                {:ok, info}
+
+              {:error, :closed} ->
+                reply = call pool, resource, method, filter, payload
+                delete pool, id
+                {reply, nil}
+              {:error, reason, :closed, conn} ->
+                delete pool, id
+                if info.revive do
+                  AgentMap.update conns, id, fn nil ->
+                    case Conn.init conn, info.init_args do
+                      {:ok, conn} ->
+                        %{info | conn: conn}
+                      {:error, reason, :infinity, conn} ->
+                        Logger.error "Failed to reinitialize connection. Reason: #{inspect reason}. Will not try."
+                        delete pool, id
+                        nil
+                      {:error, reason, timeout, conn} ->
+                        Logger.warn "Failed to reinitialize connection. Reason: #{inspect reason}. Will try again in #{System.convert_time_unit timeout, :native, :milliseconds} ms"
+                        nil
+                    end
+                  end
+                end
+                {{:error, reason}, nil}
+              {:error, reason, timeout, conn} ->
+                info = %{info | timeout: timeout, conn: conn}
+                {{:error, reason}, info}
+              err ->
+                Logger.warn "Conn.call returned unexpected reply: #{inspect err}."
+                {err, info}
+            end
+          else
+
+            case filter pool, resource, method, filter do
+              {:ok, ids} ->
+
+              err -> err
+            end
+
           end
+
+
           Enum.min_by ids, fn id ->
             ttw conns[id]
           end
-        else
-          case Conn.call info.conn, method, payload do
-            {:ok, timeout, conn} ->
-              stop = System.system_time()
-              info = update_in info.stats[method], fn
-                nil -> {stop-start, 1}
-                {avg, num} -> {(avg*num+stop-start)/(num+1), num+1}
-              end
-              info = %{info | timeout: timeout, conn: conn}
-              {:ok, info}
-
-            {:ok, reply, timeout, conn} ->
-              stop = System.system_time()
-              info = update_in info.stats[method], fn
-                nil -> {stop-start, 1}
-                {avg, num} -> {(avg*num+stop-start)/(num+1), num+1}
-              end
-              info = %{info | timeout: timeout, conn: conn}
-              {{:ok, reply}, info}
-
-            {:error, }
+          if info.timeout > 100 do
+            case filter(pool, resource, method, filter) do
+              {:ok, ids} ->
+              err ->
+                err
+            end
+            Enum.min_by ids, fn id ->
+              ttw conns[id]
+            end
           end
         end
       end

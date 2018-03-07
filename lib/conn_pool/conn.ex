@@ -200,7 +200,6 @@ defprotocol Conn do
 
              stats: %{},
 
-             init_timeout: 5000, # ms
              last_call: System.system_time(),
              timeout: 0]
 
