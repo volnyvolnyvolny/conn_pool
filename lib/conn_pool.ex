@@ -438,10 +438,23 @@ defmodule Conn.Pool do
   end
 
 
-  defp transfer(pool, resource, method, filter, payload) do
-    
-  end
+  defp revive(conns, id) do
+    AgentMap.update conns, id, fn nil ->
+      case Conn.init conn, info.init_args do
+        {:ok, conn} ->
+          %{info | conn: conn}
+        {:error, reason, :infinity, conn} ->
+          Logger.error "Failed to reinitialize connection. Reason: #{inspect reason}. Will not try."
+          delete pool, id
+          nil
+        {:error, reason, timeout, conn} ->
+          Logger.warn "Failed to reinitialize connection. Reason: #{inspect reason}. Will try again in #{System.convert_time_unit timeout, :native, :milliseconds} ms"
 
+          revive conns, id
+          nil
+      end
+    end
+  end
 
   @doc """
   Select one of the connections to given `resource` and make `Conn.call/3` via
@@ -481,7 +494,7 @@ defmodule Conn.Pool do
     conns = AgentMap.get pool, :conns, & &1
     resources = AgentMap.get pool, :resources, & &1
 
-    with {:ok, ids} <- filter(pool, resource, method, filter) do
+    with {:ok, ids} <- filter pool, resource, method, filter do
       # select the best conn:
       id = Enum.min_by ids, fn id ->
         ttw conns[id]
@@ -490,6 +503,7 @@ defmodule Conn.Pool do
       AgentMap.get_and_update conns, id, fn
         nil ->
           reply = call pool, resource, method, filter, payload
+          AgentMap.delete conns, id
           {reply, nil}
         info ->
           start = System.system_time()
@@ -502,9 +516,12 @@ defmodule Conn.Pool do
             case Conn.call info.conn, method, payload do
               {:ok, :closed, conn} ->
                 delete pool, id
+                if info.revive == :force, do: revive conns, id
                 {:ok, nil}
+
               {:ok, reply, :closed, conn} ->
                 delete pool, id
+                if info.revive == :force, do: revive conns, id
                 {{:ok, reply}, nil}
 
               {:ok, timeout, conn} ->
@@ -530,22 +547,9 @@ defmodule Conn.Pool do
                 {reply, nil}
               {:error, reason, :closed, conn} ->
                 delete pool, id
-                if info.revive do
-                  AgentMap.update conns, id, fn nil ->
-                    case Conn.init conn, info.init_args do
-                      {:ok, conn} ->
-                        %{info | conn: conn}
-                      {:error, reason, :infinity, conn} ->
-                        Logger.error "Failed to reinitialize connection. Reason: #{inspect reason}. Will not try."
-                        delete pool, id
-                        nil
-                      {:error, reason, timeout, conn} ->
-                        Logger.warn "Failed to reinitialize connection. Reason: #{inspect reason}. Will try again in #{System.convert_time_unit timeout, :native, :milliseconds} ms"
-                        nil
-                    end
-                  end
-                end
+                if info.revive, do: revive conns, id
                 {{:error, reason}, nil}
+
               {:error, reason, timeout, conn} ->
                 info = %{info | timeout: timeout, conn: conn}
                 {{:error, reason}, info}
@@ -553,28 +557,13 @@ defmodule Conn.Pool do
                 Logger.warn "Conn.call returned unexpected reply: #{inspect err}."
                 {err, info}
             end
-          else
-
+          else # ttw > 50
             case filter pool, resource, method, filter do
               {:ok, ids} ->
+                _ttw = Enum.min_by ids, fn -> ttw conns[id] end
+                if _ttw < ttw, do: call pool, resource, method, filter, payload
 
               err -> err
-            end
-
-          end
-
-
-          Enum.min_by ids, fn id ->
-            ttw conns[id]
-          end
-          if info.timeout > 100 do
-            case filter(pool, resource, method, filter) do
-              {:ok, ids} ->
-              err ->
-                err
-            end
-            Enum.min_by ids, fn id ->
-              ttw conns[id]
             end
           end
         end
