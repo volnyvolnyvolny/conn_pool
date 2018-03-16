@@ -98,7 +98,7 @@ defmodule Conn.Pool do
   """
   @spec start_link(GenServer.options) :: GenServer.on_start
   def start_link(opts) do
-    AgentMap.start_link [conns: AgentMap.new(), resource: %{}] ++ opts
+    AgentMap.start_link [conns: AgentMap.new(), resources: %{}] ++ opts
   end
 
 
@@ -107,7 +107,7 @@ defmodule Conn.Pool do
   """
   @spec start(GenServer.options) :: GenServer.on_start
   def start(opts) do
-    AgentMap.start [conns: AgentMap.new(), resource: %{}] ++ opts
+    AgentMap.start [conns: AgentMap.new(), resources: %{}] ++ opts
   end
 
 
@@ -128,9 +128,7 @@ defmodule Conn.Pool do
     * `{:error, reason}` in case `Conn.init/2` returns arbitrary error.
   """
 
-  @spec init(Conn.Pool.t, Conn.t, any)
-        :: {:ok, id} | {:error, :timeout | :methods | reason}
-  @spec init(Conn.Pool.t, conn_info, any)
+  @spec init(Conn.Pool.t, Conn.t | conn_info, any)
         :: {:ok, id} | {:error, :timeout | :methods | reason}
 
   def init(pool, info_or_conn, init_args \\ nil)
@@ -138,10 +136,10 @@ defmodule Conn.Pool do
     task = Task.async fn ->
       Conn.init conn, init_args
     end
-    case Task.yield(task, info.init_timeout) || Task.shutdown task do
+    case Task.yield(task, :infinity) || Task.shutdown task do
       {:ok, {:ok, conn}} ->
-        info = %{info | conn: conn}
-        put pool, Map.put_new(info, :init_args, init_args)
+        put pool, %{info | conn: conn,
+                           init_args: init_args}
       {:ok, err} ->
         err
       nil ->
@@ -154,23 +152,23 @@ defmodule Conn.Pool do
 
 
   # add conn to pool
-  defp add(pool, methods, conn) do
-    info = %{info | methods: methods, conn: conn}
+  defp add(pool, info) do
+    conns = AgentMap.get pool, :conns
+    resources = AgentMap.get pool, :resources
+
     id = gen_id()
 
-    conns = AgentMap.get pool, :conns, & &1
     AgentMap.put conns, id, info
 
-    AgentMap.update pool, :resources, fn resources ->
-      res = Conn.resource conn
-      if resources[res] do
-        update_in resources[res], & [id|&1]
-      else
-        put_in resources[res], [id]
-      end
+    res = Conn.resource conn
+    if resources[res] do
+      AgentMap.update resources, res, & [id|&1]
+    else
+      AgentMap.put resources, res, [id]
     end
     id
   end
+
 
   @doc """
   Adds given `%Conn{}` to pool, returning id to refer `info.conn` in future.
@@ -213,13 +211,17 @@ defmodule Conn.Pool do
     task = Task.async fn ->
       Conn.methods conn
     end
-    case Task.yield(task, info.init_timeout) || Task.shutdown task do
+    case Task.yield(task, :infinity) || Task.shutdown task do
       {:ok, {methods, conn}} ->
-        {:ok, add(pool, methods, conn)}
+        info = %{info | methods: methods}
+        {:ok, add(pool, info)}
       {:ok, :error} ->
         {:error, :methods}
+      {:ok, {:error, _}} ->
+        {:error, :methods}
       {:ok, methods} ->
-        {:ok, add(pool, methods, conn)}
+        info = %{info | methods: methods}
+        {:ok, add(pool, info)}
       nil ->
         {:error, :timeout}
     end
@@ -227,16 +229,18 @@ defmodule Conn.Pool do
 
 
   defp delete(pool, id) do
-    AgentMap.update pool, :resources, fn resources ->
-      res = Conn.resource conn
-      if resources[res] do
-        update_in resources[res], &List.delete &1, id
-      else
-        resources
-      end
-    end
+    conns = AgentMap.get pool, :conns
+    resources = AgentMap.get pool, :resources
+    info = conns[id]
 
-    AgentMap.fetch(pool, :conns) |> AgentMap.delete(id)
+    if info do
+      res = Conn.resource info
+
+      if resources[res] do
+        AgentMap.update resources, res, &List.delete &1, id
+      end
+      AgentMap.delete conns, id
+    end
   end
 
 
@@ -281,29 +285,32 @@ defmodule Conn.Pool do
   """
   @spec pop(Conn.Pool.t, Conn.id) :: {:ok, conn_info} | :error
   def pop(pool, id) do
-    AgentMap.update pool, :resources, fn resources ->
-      res = Conn.resource conn
-      if resources[res] do
-        update_in resources[res], &List.delete &1, id
-      else
-        resources
-      end
-    end
+    conns = AgentMap.get pool, :conns
+    resources = AgentMap.get pool, :resources
+    info = conns[id]
 
-    conns = AgentMap.fetch pool, :conns
-    case AgentMap.pop conns, id, :error do
-      :error -> :error
-      conn -> {:ok, conn}
+    if info do
+      res = Conn.resource info
+
+      if resources[res] do
+        AgentMap.update resources, res, &List.delete &1, id
+      end
+      AgentMap.delete conns, id
+
+      {:ok, info}
+    else
+      :error
     end
   end
+
 
   @doc """
   Pop conns to `resource` that satisfy `filter`.
   """
   @spec pop(Conn.Pool.t, Conn.resource, (conn_info -> boolean)) :: [conn_info]
   def pop(pool, resource, filter) do
-    conns = AgentMap.get pool, :conns, & &1
-    resources = AgentMap.get pool, :resources, & &1
+    conns = AgentMap.get pool, :conns
+    resources = AgentMap.get pool, :resources
     ids = resources[resource]
 
     if ids do
@@ -319,12 +326,13 @@ defmodule Conn.Pool do
 
 
   @doc """
-  Apply given `fun` to every conn to `resource`. Returning list of results.
+  Apply given `fun` to every conn to `resource`.
+  Returns list of results.
   """
-  @spec map(Conn.Pool.t, Conn.resource, (conn_info -> any)) :: [any]
+  @spec map(Conn.Pool.t, Conn.resource, (conn_info -> a)) :: [a] when a: var
   def map(pool, resource, fun) do
-    conns = AgentMap.get pool, :conns, & &1
-    resources = AgentMap.get pool, :resources, & &1
+    conns = AgentMap.get pool, :conns
+    resources = AgentMap.get pool, :resources
     ids = resources[resource]
 
     if ids do
@@ -338,7 +346,7 @@ defmodule Conn.Pool do
 
 
   @doc """
-  Update every conn to resource with `fun`.
+  Update every conn to `resource` with `fun`.
   This function always returns `:ok`.
 
   ## Example
@@ -361,8 +369,8 @@ defmodule Conn.Pool do
   """
   @spec update(Conn.Pool.t, Conn.resource, (conn_info -> conn_info)) :: :ok
   def update(pool, resource, fun) do
-    conns = AgentMap.get pool, :conns, & &1
-    resources = AgentMap.get pool, :resources, & &1
+    conns = AgentMap.get pool, :conns
+    resources = AgentMap.get pool, :resources
     ids = resources[resource]
 
     if ids do
@@ -375,11 +383,11 @@ defmodule Conn.Pool do
 
 
   @doc """
-  Is pool has conns to given `resource`?
+  Is `pool` has conns to the given `resource`?
   """
   @spec empty?(Conn.Pool.t, Conn.resource) :: boolean
   def empty?(pool, resource) do
-    resources = AgentMap.get pool, :resources, & &1
+    resources = AgentMap.get pool, :resources
     resources[resource] && true || false # :)
   end
 
@@ -389,8 +397,8 @@ defmodule Conn.Pool do
   """
   @spec resources(Conn.Pool.t, Conn.resource) :: [Conn.resource]
   def resources(pool) do
-    resources = AgentMap.get pool, :resources, & &1
-    Map.keys resources
+    resources = AgentMap.get pool, :resources
+    AgentMap.keys resources
   end
 
 
@@ -630,26 +638,37 @@ defmodule Conn.Pool do
   """
   @spec extra(Conn.Pool.t, id, any) :: {:ok, any} | :error
   def extra(pool, id, extra) do
-    GenServer.call pool, {:extra, id, extra}
+    with {:ok, info} <- info pool, id do
+      conns = AgentMap.get pool, :conns
+      AgentMap.put conns[id], %{info | extra: extra}
+      {:ok, info.extra}
+    end
   end
 
 
   @doc """
-  Pool stores connections wraped in `%Conn{}`. Using this method this structs
-  could be retrived.
+  Retrives connection wraped in a `%Conn{}`.
+  Returns `{:ok, conn_info}` or `:error`.
 
   ## Example
 
       iex> {:ok, pool} = Conn.Pool.start_link()
       iex> {:ok, id} = Conn.Pool.init pool, %Conn.Agent{}, fn -> 42 end
-      iex> (Conn.Pool.info pool, id).extra
+      iex> {:ok, info} = Conn.Pool.info pool, id
+      iex> info.extra
       nil
       iex> Conn.Pool.extra pool, id, :extra
-      iex> (Conn.Pool.info pool, id).extra
+      nil
+      iex> {:ok, info} = Conn.Pool.info pool, id
+      iex> info.extra
       :extra
   """
-  @spec info(Conn.Pool.t, id) :: %Conn{}
+  @spec info(Conn.Pool.t, id) :: {:ok, %Conn{}} | :error
   def info(pool, id) do
-    GenServer.call pool, {:info, id}
+    conns = AgentMap.get pool, :conns
+    AgentMap.get conns, id, fn
+      nil -> :error
+      info -> {:ok, info}
+    end
   end
 end

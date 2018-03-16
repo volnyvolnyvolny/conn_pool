@@ -348,7 +348,7 @@ defprotocol Conn do
       iex> Conn.methods %Conn.Agent{}
       [:get, :get_and_update, :update, :stop]
   """
-  @spec methods(Conn.t) :: [method] | {[method], Conn.t}
+  @spec methods(Conn.t) :: [method] | {[method], Conn.t} | :error
   def methods(conn)
 
 
