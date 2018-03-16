@@ -33,9 +33,7 @@
 #   end
 # end
 
-
 defprotocol Conn do
-
   @moduledoc """
   High level abstraction that represents connection in the most common sense.
   Implementation can use any transport to connect to any remote or VM-local
@@ -190,30 +188,27 @@ defprotocol Conn do
   """
 
   @enforce_keys [:conn]
-  defstruct [:conn,
-             :init_args,
-             :extra,
-             :expires,
-             :methods,
+  defstruct [
+    :conn,
+    :init_args,
+    :extra,
+    :expires,
+    :methods,
+    revive: false,
+    stats: %{},
+    last_call: System.system_time(),
+    timeout: 0
+  ]
 
-             revive: false,
+  @type t :: term
+  @type id :: non_neg_integer
 
-             stats: %{},
-
-             last_call: System.system_time(),
-             timeout: 0]
-
-
-  @type  t :: term
-  @type  id :: non_neg_integer
-
-  @type  method :: any
-  @type  auth :: any
-  @type  resource :: any
-  @type  reply :: any
-  @type  reason :: any
-  @type  init_args :: any
-
+  @type method :: any
+  @type auth :: any
+  @type resource :: any
+  @type reply :: any
+  @type reason :: any
+  @type init_args :: any
 
   @doc """
   Initialize connection, args could be provided.
@@ -236,11 +231,10 @@ defprotocol Conn do
       iex> Conn.resource conn1 == Conn.resource conn2
       true
   """
-  @spec init(Conn.t, init_args)
-        :: {:ok, Conn.t} |
-           {:error, :timeout | reason, timeout, Conn.t}
+  @spec init(Conn.t(), init_args) ::
+          {:ok, Conn.t()}
+          | {:error, :timeout | reason, timeout, Conn.t()}
   def init(_conn, args \\ nil)
-
 
   @doc """
   Interact using given connection, method and data.
@@ -269,15 +263,14 @@ defprotocol Conn do
       iex> Conn.call conn, :get, & &1
       {:error, :closed}
   """
-  @spec call(Conn.t, Conn.method, any)
-        :: {:ok,        0 | pos_integer | :infinity | :closed, Conn.t}
-         | {:ok, reply, 0 | pos_integer | :infinity | :closed, Conn.t}
-         | {:error, :closed}
-         | {:error, :timeout,      0 | pos_integer | :infinity | :closed, Conn.t}
-         | {:error, :notsupported, 0 | pos_integer | :infinity | :closed, Conn.t}
-         | {:error, reason,        0 | pos_integer | :infinity | :closed, Conn.t}
+  @spec call(Conn.t(), Conn.method(), any) ::
+          {:ok, 0 | pos_integer | :infinity | :closed, Conn.t()}
+          | {:ok, reply, 0 | pos_integer | :infinity | :closed, Conn.t()}
+          | {:error, :closed}
+          | {:error, :timeout, 0 | pos_integer | :infinity | :closed, Conn.t()}
+          | {:error, :notsupported, 0 | pos_integer | :infinity | :closed, Conn.t()}
+          | {:error, reason, 0 | pos_integer | :infinity | :closed, Conn.t()}
   def call(conn, method, payload \\ nil)
-
 
   # @doc """
   # Undo changes that were made by `Conn.call/3`. This used in
@@ -310,7 +303,6 @@ defprotocol Conn do
   #                                      | {:error, :unsupported}
   # def undo(conn, method, payload_used \\ [])
 
-
   @doc """
   Resource is an arbitrary term. Mostly it is some pid. Connection represents
   interaction with resource.
@@ -328,9 +320,8 @@ defprotocol Conn do
       iex> Conn.resource conn1 == Conn.resource conn2
       true
   """
-  @spec resource(Conn.t) :: resource | [resource]
+  @spec resource(Conn.t()) :: resource | [resource]
   def resource(conn)
-
 
   @doc """
   Methods of interactions available for connection. Can be http-methods: `:get`,
@@ -348,13 +339,11 @@ defprotocol Conn do
       iex> Conn.methods %Conn.Agent{}
       [:get, :get_and_update, :update, :stop]
   """
-  @spec methods(Conn.t) :: [method] | {[method], Conn.t} | :error
+  @spec methods(Conn.t()) :: [method] | {[method], Conn.t()} | :error
   def methods(conn)
-
 
   @type data :: any
   @type rest :: data
-
 
   @doc """
   Parse data in context of given connection.
@@ -377,15 +366,14 @@ defprotocol Conn do
 
   See example in the head of the module docs.
   """
-  @spec parse(Conn.t, data)
-        :: :ok
-         | {:ok, {:call, method, data}, rest}
-         | {:ok, :methods, rest}
-#         | {:ok, {:undo, method, data}, rest}
+  @spec parse(Conn.t(), data) ::
+          :ok
+          | {:ok, {:call, method, data}, rest}
+          | {:ok, :methods, rest}
+          #         | {:ok, {:undo, method, data}, rest}
 
-         | {:error, {:parse, data}, rest}
-         | {:error, :needmoredata}
-         | {:error, :notimplemented | reason}
+          | {:error, {:parse, data}, rest}
+          | {:error, :needmoredata}
+          | {:error, :notimplemented | reason}
   def parse(_conn, data)
-
 end
