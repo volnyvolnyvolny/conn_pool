@@ -398,8 +398,11 @@ defmodule Conn.Pool do
 
     if ids do
       ids_and_infos =
-        for id <- ids, info = conns[id], method in info.methods do
-          {id, info}
+        for id <- ids,
+            info = conns[id],
+            info.state in [:ready, :reviving],
+            method in info.methods do
+              {id, info}
         end
 
       if ids_and_infos == [] do
@@ -421,7 +424,7 @@ defmodule Conn.Pool do
     end
   end
 
-
+  # TODO
   defp revive(conns, id) do
     AgentMap.update conns, id, fn nil ->
       case Conn.init conn, info.init_args do
@@ -440,13 +443,26 @@ defmodule Conn.Pool do
     end
   end
 
-  defp avg(conns, id, method) do
-    conns = AgentMap.get pool, :conns
-    case conns[id].stats[method] do
-      {avg, _} -> avg
-      nil -> 0
+  # Estimated time to wait until call can be made on this id.
+  defp waiting_time(conns, id) do
+    with {:ok, info} <- AgentMap.fetch(conns, id) do
+      {sum, n} = Enum.reduce info.stats, {0,0}, fn
+        {key, {avg, num}}, {sum, n} ->
+          {sum + avg * num, n+num}
+      end
+
+      {:ok, (sum / n) * AgentMap.queue_len(conns, id) + info.timeout}
     end
   end
+
+  # Select the best conn.
+  defp select(pool, resource, method, filter) do
+    conns = AgentMap.get pool, :conns
+    with {:ok, ids} <- filter pool, resource, method, filter do
+      {:ok, Enum.min_by ids, &waiting_time(conns, &1)}
+    end
+  end
+
 
   defp update_stats( info, method, start) do
     stop = System.system_time()
@@ -455,6 +471,81 @@ defmodule Conn.Pool do
       {avg, num} -> {(avg*num+stop-start)/(num+1), num+1}
     end
   end
+
+
+  defp _call(%{state: :closed}=info, {pool, resource, method, filter, payload}) do
+    conns = AgentMap.get pool, :conns
+    case select(conns) do
+      {:ok, id} ->
+         fun = fn info ->
+          _call info, {pool, resource, method, filter, payload}
+         end
+         {:chain, {id, fun}, info}
+      err ->
+        {err, info}
+    end
+  end
+
+  defp _call(info, {pool, resource, method, filter, payload}) do
+     start = System.system_time()
+     timeout = System.convert_time_unit(info.timeout, :milliseconds, :native)
+     ttw = (info.last_call + timeout) - start
+
+     if ttw < 50 do
+       Process.sleep(if ttw < 0, do: 0, else: ttw)
+
+       case Conn.call info.conn, method, payload do
+         {:ok, :closed, conn} ->
+                  delete pool, id
+                  if info.revive == :force, do: revive conns, id
+                  {:ok, nil}
+
+                {:ok, reply, :closed, conn} ->
+                  delete pool, id
+                  if info.revive == :force, do: revive conns, id
+                    {{:ok, reply}, nil}
+
+                {:ok, timeout, conn} ->
+                  info = update_stats(info, method, start)
+                  info = %{info | conn: conn, timeout: timeout}
+                  {:ok, info}
+
+                {:ok, reply, timeout, conn} ->
+                  info = update_stats(info, method, start)
+                  info = %{info | conn: conn, timeout: timeout}
+                  {{:ok, reply}, info}
+
+                {:error, :closed} ->
+                  reply = call pool, resource, method, filter, payload
+                  delete pool, id
+                  {reply, nil}
+
+                {:error, reason, :closed, conn} ->
+                  delete pool, id
+                  if info.revive, do: revive conns, id
+                  {{:error, reason}, nil}
+
+                {:error, reason, timeout, conn} ->
+                  info = %{info | timeout: timeout, conn: conn}
+                  {{:error, reason}, info}
+
+                err ->
+                  Logger.warn "Conn.call returned unexpected: #{inspect err}."
+                  {err, info}
+              end
+          # ttw > 50
+          else
+            case filter pool, resource, method, filter do
+              {:ok, ids} ->
+                _avg = Enum.min_by ids, &avg(conns, &1, method)
+                if _avg < ttw, do: call pool, resource, method, filter, payload
+
+              err -> err
+            end
+          end
+        end
+  end
+
 
   @doc """
   Select one of the connections to given `resource` and make `Conn.call/3` via
@@ -491,80 +582,12 @@ defmodule Conn.Pool do
     call pool, resource, method, fn _ -> true end, payload
   end
   def call(pool, resource, method, filter, payload) do
-    conns = AgentMap.get pool, :conns
-    resources = AgentMap.get pool, :resources
+    import AgentMap
+    conns = get pool, :conns
+    resources = get pool, :resources
 
-    with {:ok, ids} <- filter pool, resource, method, filter do
-      # Select the best conn.
-      id = Enum.min_by ids, &avg(conns, id, method)
-
-      AgentMap.get_and_update conns, id, fn
-        nil ->
-          delete pool, id
-          reply = call pool, resource, method, filter, payload
-          {reply, nil}
-
-        info ->
-          start = System.system_time()
-          timeout = System.convert_time_unit(info.timeout, :milliseconds, :native)
-          ttw = (info.last_call + timeout) - start
-
-          if ttw < 50 do
-            Process.sleep(if ttw < 0, do: 0, else: ttw)
-
-            case Conn.call info.conn, method, payload do
-              {:ok, :closed, conn} ->
-                delete pool, id
-                if info.revive == :force, do: revive conns, id
-                {:ok, nil}
-
-              {:ok, reply, :closed, conn} ->
-                delete pool, id
-                if info.revive == :force, do: revive conns, id
-                {{:ok, reply}, nil}
-
-              {:ok, timeout, conn} ->
-                info = update_stats(info, method, start)
-                info = %{info | conn: conn, timeout: timeout}
-                {:ok, info}
-
-              {:ok, reply, timeout, conn} ->
-                info = update_stats(info, method, start)
-                info = %{info | conn: conn, timeout: timeout}
-                {{:ok, reply}, info}
-
-              {:error, :closed} ->
-                reply = call pool, resource, method, filter, payload
-                delete pool, id
-                {reply, nil}
-
-              {:error, reason, :closed, conn} ->
-                delete pool, id
-                if info.revive, do: revive conns, id
-                {{:error, reason}, nil}
-
-              {:error, reason, timeout, conn} ->
-                info = %{info | timeout: timeout, conn: conn}
-                {{:error, reason}, info}
-
-              err ->
-                Logger.warn "Conn.call returned unexpected: #{inspect err}."
-                {err, info}
-            end
-          # ttw > 50
-          else
-            case filter pool, resource, method, filter do
-              {:ok, ids} ->
-                _avg = Enum.min_by ids, &avg(conns, &1, method)
-                if _avg < ttw, do: call pool, resource, method, filter, payload
-
-              err -> err
-            end
-          end
-        end
-      end
-    else
-      err -> err
+    with {:ok, id} <- select(conns) do
+      get_and_update conns, id, &_call(&1, {pool, resource, method, filter, payload})
     end
   end
 

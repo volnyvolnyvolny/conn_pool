@@ -187,6 +187,16 @@ defprotocol Conn do
   protocol.
   """
 
+  @type t :: %Conn{conn: any,
+                   init_args: any | nil,
+                   extra: any | nil,
+                   expires: pos_integer | nil,
+                   methods: [method],
+                   state: :ready | :reviving | :closed,
+                   stats: %{required(method) => {non_neg_integer, pos_integer}},
+                   last_call: pos_integer,
+                   timeout: timeout}
+
   @enforce_keys [:conn]
   defstruct [
     :conn,
@@ -194,6 +204,7 @@ defprotocol Conn do
     :extra,
     :expires,
     :methods,
+    :state,
     revive: false,
     stats: %{},
     last_call: System.system_time(),
