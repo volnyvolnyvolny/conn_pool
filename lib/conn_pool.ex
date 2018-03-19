@@ -100,8 +100,7 @@ defmodule Conn.Pool do
   @spec start_link(GenServer.options()) :: GenServer.on_start()
   def start_link(opts \\ []) do
     conns_f = fn -> AgentMap.new() end
-    resources_f = fn -> AgentMap.new() end
-    AgentMap.start_link([conns: conns_f, resources: resources_f] ++ opts)
+    AgentMap.start_link([conns: conns_f, resources: fn -> %{} end] ++ opts)
   end
 
   @doc """
@@ -110,8 +109,7 @@ defmodule Conn.Pool do
   @spec start(GenServer.options()) :: GenServer.on_start()
   def start(opts \\ []) do
     conns_f = fn -> AgentMap.new() end
-    resources_f = fn -> AgentMap.new() end
-    AgentMap.start([conns: conns_f, resources: resources_f] ++ opts)
+    AgentMap.start([conns: conns_f, resources: fn -> %{} end] ++ opts)
   end
 
   @doc """
@@ -160,7 +158,6 @@ defmodule Conn.Pool do
   # add conn to pool
   defp add(pool, info) do
     conns = AgentMap.get(pool, :conns)
-    resources = AgentMap.get(pool, :resources)
 
     id = gen_id()
 
@@ -168,10 +165,8 @@ defmodule Conn.Pool do
 
     res = Conn.resource(info.conn)
 
-    if resources[res] do
-      AgentMap.update(resources, res, &[id | &1])
-    else
-      AgentMap.put(resources, res, [id])
+    AgentMap.update pool, :resources, fn map ->
+      Map.update map, res, [id], &[id | &1]
     end
 
     id
@@ -286,17 +281,17 @@ defmodule Conn.Pool do
   @spec pop(Conn.Pool.t(), Conn.id()) :: {:ok, Conn.info()} | :error
   def pop(pool, id) do
     conns = AgentMap.get(pool, :conns)
-    resources = AgentMap.get(pool, :resources)
     info = conns[id]
 
     if info do
       res = Conn.resource(info)
 
-      if resources[res] do
-        AgentMap.update(resources, res, &List.delete(&1, id))
-      end
-
       AgentMap.delete(conns, id)
+      AgentMap.update pool, :resources, fn map ->
+        if map[res] do
+          Map.update! map, res, &List.delete(&1, id)
+        end
+      end
 
       {:ok, info}
     else
@@ -393,8 +388,9 @@ defmodule Conn.Pool do
   """
   @spec resources(Conn.Pool.t()) :: [Conn.resource()]
   def resources(pool) do
-    resources = AgentMap.get(pool, :resources)
-    AgentMap.keys(resources)
+    pool
+    |> AgentMap.get(:resources)
+    |> Map.keys()
   end
 
   # Returns {:ok, ids} | {:error, :resources} | {:error, method}
@@ -435,12 +431,10 @@ defmodule Conn.Pool do
   defp _revive(pool, id, info) do
     case Conn.init(info.conn, info.init_args) do
       {:ok, conn} ->
-        resources = AgentMap.get(pool, :resources)
         res = Conn.resource(conn)
 
-        AgentMap.update(resources, res, fn
-          nil -> [id]
-          rs -> [id | rs]
+        AgentMap.update(pool, :resources, fn map ->
+          Map.update map, res, [id], &[id | &1]
         end)
 
         %{info | conn: conn}
