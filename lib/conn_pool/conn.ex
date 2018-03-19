@@ -1,7 +1,7 @@
 # defmodule Conn.Defaults do
 #   @moduledoc """
 #   Default implementations of optional callbacks of `Conn` protocol:
-#   `Conn.undo/3`, `Conn.set_auth/3`. All of them are overridable, and by default
+#   `Conn.undo/3`. All of them are overridable, and by default
 #   return `{:error, :notsupported}`.
 
 #   Use it like this:
@@ -187,15 +187,17 @@ defprotocol Conn do
   protocol.
   """
 
-  @type t :: %Conn{conn: any,
-                   init_args: any | nil,
-                   extra: any | nil,
-                   expires: pos_integer | nil,
-                   methods: [method],
-                   state: :ready | :reviving | :closed,
-                   stats: %{required(method) => {non_neg_integer, pos_integer}},
-                   last_call: pos_integer,
-                   timeout: timeout}
+  @type info :: %Conn{
+          conn: any,
+          init_args: any | nil,
+          extra: any | nil,
+          expires: pos_integer | nil,
+          methods: [method],
+          state: :ready | :closed,
+          stats: %{required(method) => {non_neg_integer, pos_integer}},
+          last_call: pos_integer,
+          timeout: timeout
+        }
 
   @enforce_keys [:conn]
   defstruct [
@@ -204,7 +206,7 @@ defprotocol Conn do
     :extra,
     :expires,
     :methods,
-    :state,
+    state: :ready,
     revive: false,
     stats: %{},
     last_call: System.system_time(),
@@ -381,10 +383,9 @@ defprotocol Conn do
           :ok
           | {:ok, {:call, method, data}, rest}
           | {:ok, :methods, rest}
-          #         | {:ok, {:undo, method, data}, rest}
-
           | {:error, {:parse, data}, rest}
           | {:error, :needmoredata}
           | {:error, :notimplemented | reason}
+  #         | {:ok, {:undo, method, data}, rest}
   def parse(_conn, data)
 end

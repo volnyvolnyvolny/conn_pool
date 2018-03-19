@@ -1,4 +1,4 @@
 defmodule ConnPoolTest do
   use ExUnit.Case
-  doctest ConnPool
+  doctest Conn.Pool
 end

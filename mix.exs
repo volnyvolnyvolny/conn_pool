@@ -4,18 +4,30 @@ defmodule ConnPool.Mixfile do
   def project do
     [
       app: :conn_pool,
+      name: "Conn.Pool",
       version: "0.1.0",
       elixir: "~> 1.6",
-      start_permanent: Mix.env() == :prod,
-      deps: deps()
+      deps: deps(),
+      docs: docs(),
+      package: package(),
+      aliases: aliases(),
+      elixirc_paths: elixirc_paths(Mix.env())
     ]
   end
 
-  # Run "mix help compile.app" to learn about applications.
-  def application do
+  defp aliases do
     [
-      extra_applications: [:logger],
-      mod: {ConnPool.Application, []}
+      quality: [
+        "format",
+        "credo --strict"
+      ]
+    ]
+  end
+
+  defp docs do
+    [
+      extras: ["README.md"],
+      main: "readme"
     ]
   end
 
@@ -28,4 +40,19 @@ defmodule ConnPool.Mixfile do
       {:credo, "~> 0.8", only: :dev}
     ]
   end
+
+  defp package do
+    [
+      maintainers: ["Valentin Tumanov"],
+      licenses: ["MIT"],
+      links: %{
+        "GitHub" => "https://github.com/garyposter/conn-pool",
+        "Docs" => "http://hexdocs.pm/conn_pool"
+      }
+    ]
+  end
+
+  # Specifies which paths to compile per environment.
+  defp elixirc_paths(:test), do: ["lib", "test/conn"]
+  defp elixirc_paths(_), do: ["lib"]
 end
