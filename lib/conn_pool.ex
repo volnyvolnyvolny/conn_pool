@@ -4,14 +4,14 @@ defmodule Conn.Pool do
   require Logger
 
   @moduledoc """
-  Connection pool helps storing, sharing and using connections. It also make it
+  Connection pool helps storing, sharing and using connections. It also make its
   possible to use the same connection concurrently. For example, if there exists
   remote API accessible via websocket, pool can provide shared access, making
   queues of calls. If connection is closed/expires — pool will reinitialize or
   drop it and awaiting calls will be moved to another connection queue.
 
   Start pool via `start_link/1` or `start/1`. Add connections via `init/3` or
-  `Conn.init/2` → `put/2`. Make calls from pool via `call/4` or `cast/4`.
+  `Conn.init/2` → `put/2`. Make calls from pool via `call/4`.
 
   In the following examples, `%Conn.Agent{}` represents connection to some
   `Agent` that can be created separately or via `Conn.init/2`. Available methods
@@ -22,29 +22,27 @@ defmodule Conn.Pool do
   and use.
 
       iex> {:ok, pool} = Conn.Pool.start_link()
-      iex> {:ok, agent} = Agent.start_link fn -> 42 end
-      iex> {:ok, id} = Conn.Pool.init %Conn.Agent{}, res: agent # `agent` is the resource for `Conn.Agent`
-      iex> Conn.Pool.extra pool, id, type: :agent # add `extra` info
-      nil
-      iex> {:ok, info} = Conn.Pool.info pool, id # pool wraps conn into `%Conn{}` struct
+      iex> {:ok, agent} = Agent.start_link(fn -> 42 end)
+      iex> {:ok, id} = Conn.Pool.init(pool, %Conn.Agent{}, res: agent)
+      iex> Conn.Pool.extra(pool, id, type: :agent) # add `extra` info
+      {:ok, nil}
+      # Pool wraps conn into `%Conn{}` struct.
+      iex> {:ok, info} = Conn.Pool.info(pool, id)
       iex> info.extra
       [type: :agent]
-      iex> agent == Conn.resource info.conn
+      iex> info.methods
+      [:get, :get_and_update, :update, :stop]
+      iex> agent == Conn.resource(info.conn)
       true
       #
-      iex> Conn.Pool.call pool, agent, :get, & &1
+      iex> Conn.Pool.call(pool, agent, :get, & &1)
       {:ok, 42}
-      iex> Conn.Pool.call pool, agent, :get, fn info ->
-      ...>   info.extra[:type] != :agent
-      ...> end, & &1
+      iex> Conn.Pool.call(pool, agent, :get, & &1.extra[:type] != :agent, & &1)
       {:error, :filter}
       #
-      iex> Conn.Pool.cast pool, agent, :update, & &1+1
-      iex> Conn.Pool.call pool, agent, :get, & &1
-      {:ok, 43}
-      iex> Conn.Pool.call pool, agent, :badmethod
+      iex> Conn.Pool.call(pool, agent, :badmethod)
       {:error, :method}
-      iex> Conn.Pool.call pool, :badres, :badmethod
+      iex> Conn.Pool.call(pool, :badres, :badmethod)
       {:error, :resource}
 
   In the above example connection was initialized and used directly from pool.
@@ -54,30 +52,26 @@ defmodule Conn.Pool do
   In the following example connection will be added via `put/2`.
 
       iex> {:ok, pool} = Conn.Pool.start_link()
-      iex> {:ok, c} = Conn.init %Conn.Agent{}, fn -> 42 end
-      iex> pid = c.res
-      iex> info = %Conn{conn: c, init_args: [res: pid], revive: true} # wrap
-      iex> id = Conn.Pool.put pool, info # may return `:error` if
-      iex> {:ok, info} = Conn.Pool.info(pool, id)
-      iex> info.methods
-      [:get, :get_and_update, :update, :stop]
-      # `put/2` and `put/3` are making `Conn.methods/1` call, writing results
+      iex> {:ok, agent} = Agent.start_link(fn -> 42 end)
+      iex> {:ok, conn} = Conn.init(%Conn.Agent{}, res: agent)
+      iex> Conn.Pool.put(pool, %Conn{conn: conn, revive: true})
+      # `put/2` is making `Conn.methods/1` call.
       #
-      # let's close conn:
-      iex> Process.alive?(pid) && not Conn.Pool.empty?(pool, pid)
+      # Let's close connection to `agent`:
+      iex> Process.alive?(agent) && not Conn.Pool.empty?(pool, agent)
       true
-      # there are conns for resource `pid` in this pool
-      iex> Conn.Pool.call pool, pid, :stop
+      # There are conns for resource `agent` in this pool.
+      iex> Conn.Pool.call(pool, agent, :stop)
       :ok
-      iex> not Process.alive?(pid) && Conn.Pool.empty?(pool, pid)
+      iex> not Process.alive?(agent) && Conn.Pool.empty?(pool, agent)
       true
-      # now conn is `:closed` and will be reinitialized by pool
-      # but
-      iex> {:error, :dead, :infinity, info.conn} == Conn.init %Conn.Agent{}, res: c.res
+      # Now conn is `:closed` and will be reinitialized by pool,
+      # but:
+      iex> {:error, :dead, :infinity, conn} == Conn.init(conn)
       true
       # `Conn.init/2` suggests to never reinitialize again (`:infinity` timeout)
-      # so pool will just drop this conn
-      iex> Conn.Pool.resources pool
+      # so pool will just drop this conn.
+      iex> Conn.Pool.resources(pool)
       []
 
   ## Name registration
@@ -165,9 +159,9 @@ defmodule Conn.Pool do
 
     res = Conn.resource(info.conn)
 
-    AgentMap.update pool, :resources, fn map ->
-      Map.update map, res, [id], &[id | &1]
-    end
+    AgentMap.update(pool, :resources, fn map ->
+      Map.update(map, res, [id], &[id | &1])
+    end)
 
     id
   end
@@ -187,14 +181,14 @@ defmodule Conn.Pool do
   ## Example
 
       iex> {:ok, pool} = Conn.Pool.start_link()
-      iex> {:ok, conn} = Conn.init %Conn.Agent{}, fn -> 42 end
+      iex> {:ok, conn} = Conn.init(%Conn.Agent{}, fn -> 42 end)
       iex> at = System.system_time()+System.convert_time_unit(5, :second, :native)
       iex> info = %Conn{
       ...>   conn: conn,
       ...>   extra: :extra,
       ...>   expires: at
       ...> }
-      iex> {:ok, id} = Conn.Pool.put pool, info
+      iex> {:ok, id} = Conn.Pool.put(pool, info)
       iex> {:ok, info} = Conn.Pool.info(pool, id)
       iex> ^at = info.expires
       iex> {:ok, info} = Conn.Pool.info(pool, id)
@@ -203,37 +197,28 @@ defmodule Conn.Pool do
       #
       # let's make some tweak
       #
-      iex> {:ok, info} = Conn.Pool.pop info, id
-      iex> {:ok, id} = Conn.Pool.put pool, %{info| expires: nil}
+      iex> {:ok, info} = Conn.Pool.pop(pool, id)
+      iex> {:ok, id} = Conn.Pool.put(pool, %{info| expires: nil})
       iex> {:ok, info} = Conn.Pool.info(pool, id)
       iex> info.expires
       nil
   """
   @spec put(Conn.Pool.t(), Conn.info()) :: {:ok, id} | {:error, :methods | :timeout}
-
   def put(pool, %Conn{conn: conn} = info) do
-    task =
-      Task.async(fn ->
-        Conn.methods(conn)
-      end)
-
-    case Task.yield(task, :infinity) || Task.shutdown(task) do
-      {:ok, :error} ->
+    case Conn.methods(conn) do
+      :error ->
         {:error, :methods}
 
-      {:ok, {:error, _}} ->
+      {:error, _} ->
         {:error, :methods}
 
-      {:ok, {methods, conn}} ->
+      {methods, conn} ->
         info = %{info | methods: methods, conn: conn}
         {:ok, add(pool, info)}
 
-      {:ok, methods} ->
+      methods ->
         info = %{info | methods: methods}
         {:ok, add(pool, info)}
-
-      nil ->
-        {:error, :timeout}
     end
   end
 
@@ -253,45 +238,43 @@ defmodule Conn.Pool do
   ## Example
 
       iex> {:ok, pool} = Conn.Pool.start_link()
-      iex> {:ok, agent} = Agent.start_link fn -> 42 end
-      iex> {:ok, id} = Conn.Pool.init pool, %Conn.Agent{}, res: agent
-      iex> %Conn{conn: c} = Conn.Pool.pop pool, id
+      iex> {:ok, agent} = Agent.start_link(fn -> 42 end)
+      iex> {:ok, id} = Conn.Pool.init(pool, %Conn.Agent{}, res: agent)
+      iex> {:ok, %Conn{conn: c}} = Conn.Pool.pop(pool, id)
       iex> Agent.get Conn.resource(c), & &1
       42
-      iex> Conn.Pool.pop pool, id
+      iex> Conn.Pool.pop(pool, id)
       :error
-      iex> {:ok, id1} = Conn.Pool.init pool, %Conn.Agent{}, res: agent
-      iex> {:ok, id2} = Conn.Pool.init pool, %Conn.Agent{}, res: agent
-      iex> {:ok, id3} = Conn.Pool.init pool, %Conn.Agent{}, res: agent
-      iex> Conn.Pool.extra pool, id1, :takeme
-      nil
-      iex> Conn.Pool.extra pool, id3, :takeme
-      iex> Conn.Pool.pop pool, fn
-      ...>   %{extra: :takeme} -> true
-      ...>   _ -> false
-      ...> end
-      iex> Conn.Pool.empty? pool, agent
+      iex> {:ok, id1} = Conn.Pool.init(pool, %Conn.Agent{}, res: agent)
+      iex> {:ok, id2} = Conn.Pool.init(pool, %Conn.Agent{}, res: agent)
+      iex> {:ok, id3} = Conn.Pool.init(pool, %Conn.Agent{}, res: agent)
+      iex> Conn.Pool.extra(pool, id1, :takeme)
+      {:ok, nil}
+      iex> Conn.Pool.extra(pool, id3, :takeme)
+      iex> Conn.Pool.pop(pool, agent, & &1.extra == :takeme)
+      iex> Conn.Pool.empty?(pool, agent)
       false
-      iex> Conn.Pool.pop pool, id2
-      iex> Conn.Pool.empty? pool, agent
+      iex> Conn.Pool.pop(pool, id2)
+      iex> Conn.Pool.empty?(pool, agent)
       true
 
   Also, see example for `put/2`.
   """
   @spec pop(Conn.Pool.t(), Conn.id()) :: {:ok, Conn.info()} | :error
-  def pop(pool, id) do
+  def pop(pool, id) when is_integer(id) do
     conns = AgentMap.get(pool, :conns)
     info = conns[id]
 
     if info do
-      res = Conn.resource(info)
+      res = Conn.resource(info.conn)
 
       AgentMap.delete(conns, id)
-      AgentMap.update pool, :resources, fn map ->
+
+      AgentMap.cast(pool, :resources, fn map ->
         if map[res] do
-          Map.update! map, res, &List.delete(&1, id)
+          Map.update!(map, res, &List.delete(&1, id))
         end
-      end
+      end)
 
       {:ok, info}
     else
@@ -303,13 +286,13 @@ defmodule Conn.Pool do
   Pop conns to `resource` that satisfy `filter`.
   """
   @spec pop(Conn.Pool.t(), Conn.resource(), (Conn.info() -> boolean)) :: [Conn.info()]
-  def pop(pool, resource, filter) do
+  def pop(pool, resource, filter) when is_function(filter, 1) do
     conns = AgentMap.get(pool, :conns)
     resources = AgentMap.get(pool, :resources)
     ids = resources[resource]
 
     if ids do
-      for id <- ids, conn = conns[id], filter.(conn) do
+      for id <- ids, filter.(conns[id]) do
         pop(pool, id)
       end
     else
@@ -322,7 +305,7 @@ defmodule Conn.Pool do
   Returns list of results.
   """
   @spec map(Conn.Pool.t(), Conn.resource(), (Conn.info() -> a)) :: [a] when a: var
-  def map(pool, resource, fun) do
+  def map(pool, resource, fun) when is_function(fun, 1) do
     conns = AgentMap.get(pool, :conns)
     resources = AgentMap.get(pool, :resources)
     ids = resources[resource]
@@ -343,30 +326,47 @@ defmodule Conn.Pool do
   ## Example
 
       iex> {:ok, pool} = Conn.Pool.start_link()
-      iex> {:ok, agent} = Agent.start fn -> 42 end
-      iex> Conn.Pool.init pool, %Conn.Agent{}, res: agent
-      iex> Conn.Pool.init pool, %Conn.Agent{}, res: agent
-      iex> Conn.Pool.call pool, agent, :get, fn conn ->
-      ...>   conn.extra == :extra
-      ...> end, & &1
+      iex> {:ok, agent} = Agent.start(fn -> 42 end)
+      iex> Conn.Pool.init(pool, %Conn.Agent{}, res: agent)
+      iex> Conn.Pool.init(pool, %Conn.Agent{}, res: agent)
+      iex> Conn.Pool.call(pool, agent, :get, & &1.extra == :extra, & &1)
       {:error, :filter}
       #
-      iex> Conn.Pool.update pool, agent, conn -> %Conn{conn: conn, extra: :extra}
+      iex> Conn.Pool.update(pool, agent, & %{&1 | extra: :extra})
       :ok
-      iex> Conn.Pool.call pool, agent, :get, fn conn ->
-      ...>   conn.extra == :extra
-      ...> end, & &1
-      42
+      iex> Conn.Pool.call(pool, agent, :get, & &1.extra == :extra, & &1)
+      {:ok, 42}
   """
   @spec update(Conn.Pool.t(), Conn.resource(), (Conn.info() -> Conn.info())) :: :ok
-  def update(pool, resource, fun) do
+  def update(pool, resource, fun) when is_function(fun, 1) do
     conns = AgentMap.get(pool, :conns)
-    resources = AgentMap.get(pool, :resources)
-    ids = resources[resource]
+    ids = AgentMap.get(pool, :resources)[resource]
 
     if ids do
       for id <- ids do
-        AgentMap.update(conns, id, fun)
+        AgentMap.update(conns, id, fn info ->
+          info = fun.(info)
+
+          if info.methods && is_list(info.methods) do
+            info
+          else
+            case Conn.methods(info.conn) do
+              :error ->
+                raise "Update fun mailformed :methods key. While fixing, `Conn.methods/1` returned :error."
+
+              {:error, _} = err ->
+                raise "Update fun mailformed :methods key. While fixing, `Conn.methods/1` returned #{
+                        inspect(err)
+                      }."
+
+              {methods, conn} ->
+                %{info | methods: methods, conn: conn}
+
+              methods ->
+                %{info | methods: methods}
+            end
+          end
+        end)
       end
     end
 
@@ -379,8 +379,11 @@ defmodule Conn.Pool do
   @spec empty?(Conn.Pool.t(), Conn.resource()) :: boolean
   def empty?(pool, resource) do
     resources = AgentMap.get(pool, :resources)
-    # :)
-    (resources[resource] && true) || false
+    case resources[resource] do
+      nil -> true
+      [] -> true
+      _ -> false
+    end
   end
 
   @doc """
@@ -395,7 +398,7 @@ defmodule Conn.Pool do
 
   # Returns {:ok, ids} | {:error, :resources} | {:error, method}
   # | {:error, filter}
-  defp filter(pool, resource, method, filter) do
+  defp filter(pool, resource, method, filter) when is_function(filter, 1) do
     conns = AgentMap.get(pool, :conns, & &1)
     resources = AgentMap.get(pool, :resources, & &1)
     ids = resources[resource]
@@ -433,16 +436,17 @@ defmodule Conn.Pool do
       {:ok, conn} ->
         res = Conn.resource(conn)
 
-        AgentMap.update(pool, :resources, fn map ->
-          Map.update map, res, [id], &[id | &1]
+        AgentMap.cast(pool, :resources, fn map ->
+          Map.update(map, res, [id], &[id | &1])
         end)
 
         %{info | conn: conn}
 
       {:error, reason, :infinity, _conn} ->
-        Logger.error(
-          "Failed to reinitialize connection. Reason: #{inspect(reason)}. Stop trying."
-        )
+        IO.inspect :puk
+        # Logger.error(
+        #   "Failed to reinitialize connection. Reason: #{inspect(reason)}. Stop trying."
+        # )
 
         delete(pool, id)
         nil
@@ -462,7 +466,7 @@ defmodule Conn.Pool do
   defp revive(pool, id, info) do
     conns = AgentMap.get(pool, :conns)
 
-    AgentMap.update(conns, id, fn nil ->
+    AgentMap.cast(conns, id, fn nil ->
       _revive(pool, id, info)
     end)
   end
@@ -475,7 +479,11 @@ defmodule Conn.Pool do
           {sum + avg * num, n + num}
         end)
 
-      {:ok, sum / n * AgentMap.queue_len(conns, id) + info.timeout}
+      if n == 0 do
+        {:ok, info.timeout}
+      else
+        {:ok, sum / n * AgentMap.queue_len(conns, id) + info.timeout}
+      end
     end
   end
 
@@ -531,7 +539,9 @@ defmodule Conn.Pool do
       case Conn.call(info.conn, method, payload) do
         {:ok, :closed, conn} ->
           delete(pool, id)
+          IO.inspect(:xxxx)
           if info.revive == :force, do: revive(pool, id, info)
+          IO.inspect(:yyyy)
           info = %{info | conn: conn, state: :closed}
           {:ok, info}
 
@@ -646,7 +656,7 @@ defmodule Conn.Pool do
     call(pool, resource, method, fn _ -> true end, payload)
   end
 
-  def call(pool, resource, method, filter, payload) do
+  def call(pool, resource, method, filter, payload) when is_function(filter, 1) do
     conns = AgentMap.get(pool, :conns)
 
     with {:ok, id} <- select(pool, resource, method, filter) do
@@ -663,27 +673,22 @@ defmodule Conn.Pool do
   ## Example
 
       iex> {:ok, pool} = Conn.Pool.start_link()
-      iex> {:ok, agent} = Agent.start fn -> 42 end
-      iex> {:ok, id} = Conn.Pool.init pool, %Conn.Agent{}, res: agent
-      iex> Conn.Pool.extra pool, id, :extra
+      iex> {:ok, agent} = Agent.start(fn -> 42 end)
+      iex> {:ok, id} = Conn.Pool.init(pool, %Conn.Agent{}, res: agent)
+      iex> Conn.Pool.extra(pool, id, :extra)
       {:ok, nil}
-      iex> Conn.Pool.extra pool, id, :some
+      iex> Conn.Pool.extra(pool, id, :some)
       {:ok, :extra}
-      iex> Conn.Pool.extra pool, :badid, :some
+      iex> badid = -1
+      iex> Conn.Pool.extra(pool, badid, :some)
       :error
       #
-      iex> filter = fn
-      ...>   %Conn{extra: :extra} -> true
-      ...>   _ -> false
-      ...> end
-      iex> Conn.Pool.call pool, agent, :get, filter, & &1
+      iex> filter = & &1.extra == :extra
+      iex> Conn.Pool.call(pool, agent, :get, filter, & &1)
       {:error, :filter}
       #
       # but:
-      iex> Conn.Pool.call pool, agent, :get, fn
-      ...>   %Conn{extra: :some} -> true
-      ...>   _ -> false
-      ...> end, & &1
+      iex> Conn.Pool.call(pool, agent, :get, & &1.extra == :some, & &1)
       {:ok, 42}
   """
   @spec extra(Conn.Pool.t(), id, any) :: {:ok, any} | :error
@@ -702,18 +707,18 @@ defmodule Conn.Pool do
   ## Example
 
       iex> {:ok, pool} = Conn.Pool.start_link()
-      iex> {:ok, id} = Conn.Pool.init pool, %Conn.Agent{}, fn -> 42 end
-      iex> {:ok, info} = Conn.Pool.info pool, id
+      iex> {:ok, id} = Conn.Pool.init(pool, %Conn.Agent{}, fn -> 42 end)
+      iex> {:ok, info} = Conn.Pool.info(pool, id)
       iex> info.extra
       nil
-      iex> Conn.Pool.extra pool, id, :extra
-      nil
-      iex> {:ok, info} = Conn.Pool.info pool, id
+      iex> Conn.Pool.extra(pool, id, :extra)
+      {:ok, nil}
+      iex> {:ok, info} = Conn.Pool.info(pool, id)
       iex> info.extra
       :extra
   """
   @spec info(Conn.Pool.t(), id) :: {:ok, %Conn{}} | :error
-  def info(pool, id) do
+  def info(pool, id) when is_integer(id) do
     conns = AgentMap.get(pool, :conns)
 
     AgentMap.get(conns, id, fn

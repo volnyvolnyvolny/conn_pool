@@ -196,7 +196,8 @@ defprotocol Conn do
           state: :ready | :closed,
           stats: %{required(method) => {non_neg_integer, pos_integer}},
           last_call: pos_integer,
-          timeout: timeout
+          timeout: timeout,
+          revive: boolean | :force
         }
 
   @enforce_keys [:conn]

@@ -1,15 +1,23 @@
 defmodule(Conn.Agent, do: defstruct([:res]))
 
 defimpl Conn, for: Conn.Agent do
-  def init(conn, res: agent) do
-    if Process.alive?(agent) do
-      {:ok, %{conn | res: agent}}
+  def init(conn, nil) do
+    if Process.alive?(conn.res) do
+      {:ok, conn}
     else
       {:error, :dead, :infinity, conn}
     end
   end
 
-  def init(conn, fun) do
+  def init(conn, res: agent) do
+    if Process.alive?(agent) do
+      {:ok, %{conn | res: agent}}
+    else
+      {:error, :dead, :infinity, %{conn | res: agent}}
+    end
+  end
+
+  def init(conn, fun) when is_function(fun, 0) do
     case Agent.start_link(fun) do
       {:ok, agent} ->
         init(conn, res: agent)
