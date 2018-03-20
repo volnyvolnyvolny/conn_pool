@@ -37,7 +37,11 @@ defimpl Conn, for: Conn.Agent do
   def call(conn, method, fun \\ nil)
 
   def call(%_{res: agent} = conn, method, fun) when method in [:get, :get_and_update, :update] do
-    {:ok, apply(Agent, method, [agent, fun]), 0, conn}
+    if Process.alive?(agent) do
+      {:ok, apply(Agent, method, [agent, fun]), 0, conn}
+    else
+      {:error, :closed}
+    end
   end
 
   def call(%_{res: agent} = conn, :stop, nil) do

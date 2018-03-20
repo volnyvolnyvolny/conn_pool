@@ -15,6 +15,10 @@ defmodule ConnPool.Mixfile do
     ]
   end
 
+  def application do
+    [applications: [:logger]]
+  end
+
   defp aliases do
     [
       quality: [

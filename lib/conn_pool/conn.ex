@@ -139,48 +139,56 @@ defprotocol Conn do
       ...>     receive do
       ...>       {pid, new} ->
       ...>         data = data<>new
-      ...>         case Conn.parse %TestConn{}, data do
-      ...>           {:error, :needmoredata} -> loop rest, state
+      ...>         case Conn.parse(%TextConn{}, data) do
+      ...>           {:error, :needmoredata} ->
+      ...>              loop(rest, state)
+      ...>
       ...>           {:error, {:parse,_}, rest} ->
-      ...>              send pid, "err:parse"
-      ...>              loop rest, state
+      ...>              send(pid, "err:parse")
+      ...>              loop(rest, state)
+      ...>
       ...>           {:ok, :methods, rest} ->
-      ...>              send pid, "ok:INC,GET,STOP"
-      ...>              loop rest, state
+      ...>              send(pid, "ok:INC,GET,STOP")
+      ...>              loop(rest, state)
+      ...>
       ...>           {:ok, {:call, "INC", ""}, rest} ->
-      ...>              send pid, "ok:"<>state+1
-      ...>              loop rest, state+1
+      ...>              send(pid, "ok:"<>state+1)
+      ...>              loop(rest, state+1)
+      ...>
       ...>           {:ok, {:call, "GET", ""}, rest} ->
-      ...>              send pid, "ok:"<>state
-      ...>              loop rest, state
+      ...>              send(pid, "ok:"<>state)
+      ...>              loop(rest, state)
+      ...>
       ...>           {:ok, {:call, "STOP", ""},_rest} ->
-      ...>              send pid, "ok"
+      ...>              send(pid, "ok")
+      ...>
       ...>           {:ok, {:call, _, ""},_rest} ->
-      ...>              send pid, "err:notsupported"
-      ...>              loop rest, state
+      ...>              send(pid, "err:notsupported")
+      ...>              loop(rest, state)
+      ...>
       ...>           {:ok, {:call, _, _},_rest} ->
-      ...>              send pid, "err:badarg"
-      ...>              loop rest, state
+      ...>              send(pid, "err:badarg")
+      ...>              loop(rest, state)
       ...>         end
       ...>     end
       ...>   end
       ...> end
       ...>
       ...>
-      iex> pid = spawn_link fn -> Server.loop "" end
+      iex> pid = spawn_link(fn -> Server.loop("") end)
       iex> {:ok, pool} = Conn.Pool.start_link()
-      iex> Conn.Pool.init pool, %TextConn{}, pid
-      iex> Conn.Pool.call pool, pid, "GET"
+      iex> Conn.Pool.init(pool, %TextConn{}, pid)
+      iex> Conn.Pool.call(pool, pid, "GET")
       {:ok, 0}
-      iex> Conn.Pool.call pool, pid, "INC"
+      iex> Conn.Pool.call(pool, pid, "INC")
       {:ok, 1}
-      iex> Conn.Pool.call pool, pid, "DEC"
+      iex> Conn.Pool.call(pool, pid, "DEC")
       {:error, :notsupported}
-      iex> Conn.Pool.call pool, pid, "INC", :badarg
+      iex> Conn.Pool.call(pool, pid, "INC", :badarg)
       {:error, "badarg"}
-      iex> Conn.Pool.call pool, pid, "STOP"
+      iex> Conn.Pool.call(pool, pid, "STOP")
       :ok
-      iex> Conn.Pool.call pool, pid, "GET"
+      iex> Conn.Pool.call(pool, pid, "GET")
       {:error, :closed}
 
   Now `TextConn` could be used to connect to *any* server that implements above
@@ -191,11 +199,12 @@ defprotocol Conn do
           conn: any,
           init_args: any | nil,
           extra: any | nil,
-          expires: pos_integer | nil,
+          ttl: pos_integer | :infinity,
           methods: [method],
-          state: :ready | :closed,
+          closed: boolean,
           stats: %{required(method) => {non_neg_integer, pos_integer}},
           last_call: pos_integer,
+          last_init: pos_integer,
           timeout: timeout,
           revive: boolean | :force
         }
@@ -205,12 +214,13 @@ defprotocol Conn do
     :conn,
     :init_args,
     :extra,
-    :expires,
     :methods,
-    state: :ready,
+    ttl: :infinity,
+    closed: false,
     revive: false,
     stats: %{},
     last_call: System.system_time(),
+    last_init: System.system_time(),
     timeout: 0
   ]
 
@@ -240,9 +250,9 @@ defprotocol Conn do
 
   ## Examples
 
-      iex> {:ok, conn1} = Conn.init %Conn.Agent{}, fn -> 42 end
-      iex> {:ok, conn2} = Conn.init %Conn.Agent{}, res: Conn.resource conn1
-      iex> Conn.resource conn1 == Conn.resource conn2
+      iex> {:ok, conn1} = Conn.init(%Conn.Agent{}, fn -> 42 end)
+      iex> {:ok, conn2} = Conn.init(%Conn.Agent{}, res: Conn.resource(conn1))
+      iex> Conn.resource(conn1) == Conn.resource(conn2)
       true
   """
   @spec init(Conn.t(), init_args) ::
@@ -268,13 +278,13 @@ defprotocol Conn do
 
   ## Examples
 
-      iex> {:ok, conn} = Conn.init %Conn.Agent{}, fn -> 42 end
-      iex> {:ok, reply, 0, ^conn} = Conn.call conn, :get, & &1
+      iex> {:ok, conn} = Conn.init(%Conn.Agent{}, fn -> 42 end)
+      iex> {:ok, reply, 0, ^conn} = Conn.call(conn, :get, & &1)
       iex> reply
       42
-      iex> {:ok, :closed, conn} == Conn.call conn, :stop
+      iex> {:ok, :closed, conn} == Conn.call(conn, :stop)
       true
-      iex> Conn.call conn, :get, & &1
+      iex> Conn.call(conn, :get, & &1)
       {:error, :closed}
   """
   @spec call(Conn.t(), Conn.method(), any) ::
@@ -296,19 +306,19 @@ defprotocol Conn do
 
   # ## Examples
 
-  # {:ok, conn} = Pool.take_one( resource, [:say, :listen])
-  # {:ok, conn} = Conn.call( conn, :say, what: "Hi!", name: "Louie")
+  # {:ok, conn} = Pool.take_one(resource, [:say, :listen])
+  # {:ok, conn} = Conn.call(conn, :say, what: "Hi!", name: "Louie")
 
   #     resource = %JSON_API{url: "http://example.com/api/v1"}
 
-  #     {:ok, conn} = Pool.take_first( resource, [:say, :listen])
-  #     {:ok, conn} = Conn.call( conn, :say, what: "Hi!", name: "Louie")
+  #     {:ok, conn} = Pool.take_first(resource, [:say, :listen])
+  #     {:ok, conn} = Conn.call(conn, :say, what: "Hi!", name: "Louie")
 
-  #     :ok = Conn.undo( conn, :say, what: "Hi!", name: "Louie")
+  #     :ok = Conn.undo(conn, :say, what: "Hi!", name: "Louie")
 
   #     # or, maybe, simply:
-  #     # :ok = Conn.undo( conn, :say) #as payload doesn't matters here
-  #     {:ok, _id} = Pool.put( conn) #return connection to pool
+  #     # :ok = Conn.undo(conn, :say) #as payload doesn't matters here
+  #     {:ok, _id} = Pool.put(conn) #return connection to pool
   # """
   # @spec undo(Conn.t, method, keyword) :: :ok
   #                                      | {:ok, Conn.t}
@@ -323,15 +333,15 @@ defprotocol Conn do
 
   ## Examples
 
-      iex> {:ok, conn1} = Conn.init %Conn.Agent{}, fn -> 42 end
-      iex> {:ok, conn2} = Conn.init %Conn.Agent{}, res: Conn.resource conn
-      iex> Conn.resource conn1 == Conn.resource conn2
+      iex> {:ok, conn1} = Conn.init(%Conn.Agent{}, fn -> 42 end)
+      iex> {:ok, conn2} = Conn.init(%Conn.Agent{}, res: Conn.resource(conn1))
+      iex> Conn.resource(conn1) == Conn.resource(conn2)
       true
 
-      iex> {:ok, agent} = Agent.start_link fn -> 42 end
-      iex> {:ok, conn1} = Conn.init %Conn.Agent{}, res: agent
-      iex> {:ok, conn2} = Conn.init %Conn.Agent{}, res: agent
-      iex> Conn.resource conn1 == Conn.resource conn2
+      iex> {:ok, agent} = Agent.start_link(fn -> 42 end)
+      iex> {:ok, conn1} = Conn.init(%Conn.Agent{}, res: agent)
+      iex> {:ok, conn2} = Conn.init(%Conn.Agent{}, res: agent)
+      iex> Conn.resource(conn1) == Conn.resource(conn2)
       true
   """
   @spec resource(Conn.t()) :: resource | [resource]
@@ -350,7 +360,7 @@ defprotocol Conn do
 
   ## Examples
 
-      iex> Conn.methods %Conn.Agent{}
+      iex> Conn.methods(%Conn.Agent{})
       [:get, :get_and_update, :update, :stop]
   """
   @spec methods(Conn.t()) :: [method] | {[method], Conn.t()} | :error
