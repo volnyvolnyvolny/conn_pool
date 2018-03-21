@@ -173,16 +173,17 @@ defmodule Conn.Pool do
   end
 
   # add conn to pool
+  defp add(pool, %{last_init: :never} = info) do
+    add(pool, %{info | last_init: System.system_time()})
+  end
+
   defp add(pool, info) do
     conns = AgentMap.get(pool, :conns)
-
     id = gen_id()
-
     AgentMap.put(conns, id, info)
 
-    res = Conn.resource(info.conn)
-
     AgentMap.update(pool, :resources, fn map ->
+      res = Conn.resource(info.conn)
       Map.update(map, res, [id], &[id | &1])
     end)
 
@@ -315,7 +316,7 @@ defmodule Conn.Pool do
   @doc """
   Pop conns to `resource` that satisfy `filter`.
   """
-  @spec pop(Conn.Pool.t(), Conn.resource(), (Conn.info() -> boolean)) :: [Conn.info()]
+  @spec pop(Conn.Pool.t(), Conn.resource(), filter) :: [Conn.info()]
   def pop(pool, resource, filter) when is_function(filter, 1) do
     conns = AgentMap.get(pool, :conns)
     resources = AgentMap.get(pool, :resources, & &1)
@@ -338,14 +339,26 @@ defmodule Conn.Pool do
   def map(pool, resource, fun) when is_function(fun, 1) do
     conns = AgentMap.get(pool, :conns)
     resources = AgentMap.get(pool, :resources, & &1)
-    ids = resources[resource]
+    ids = resources[resource] || []
 
-    if ids do
-      for id <- ids do
-        fun.(conns[id])
-      end
-    else
-      []
+    for id <- ids, do: fun.(conns[id])
+  end
+
+  defp add_methods(info) do
+    case Conn.methods(info.conn) do
+      :error ->
+        raise "Update fun mailformed :methods key. While fixing, `Conn.methods/1` returned :error."
+
+      {:error, _} = err ->
+        raise "Update fun mailformed :methods key. While fixing, `Conn.methods/1` returned #{
+        inspect(err)
+        }."
+
+      {methods, conn} ->
+        %{info | methods: methods, conn: conn}
+
+      methods ->
+        %{info | methods: methods}
     end
   end
 
@@ -394,47 +407,26 @@ defmodule Conn.Pool do
       iex> Conn.Pool.call(pool, agent, :get, filter, & &1)
       {:error, :filter}
   """
-  @spec update(
-          Conn.Pool.t(),
-          Conn.resource(),
-          (Conn.info() -> boolean),
-          (Conn.info() -> Conn.info())
-        ) :: :ok
+  @spec update(Conn.Pool.t(), Conn.resource(), filter, (Conn.info() -> Conn.info())) :: :ok
   def update(pool, resource, filter, fun) when is_function(fun, 1) and is_function(filter, 1) do
     conns = AgentMap.get(pool, :conns)
     resources = AgentMap.get(pool, :resources, & &1)
-    ids = resources[resource]
+    ids = resources[resource] || []
 
-    if ids do
-      for id <- ids do
-        AgentMap.update(conns, id, fn info ->
-          if filter.(info) do
-            info = fun.(info)
+    for id <- ids do
+      AgentMap.update(conns, id, fn info ->
+        if filter.(info) do
+          info = fun.(info)
 
-            if info.methods && is_list(info.methods) do
-              info
-            else
-              case Conn.methods(info.conn) do
-                :error ->
-                  raise "Update fun mailformed :methods key. While fixing, `Conn.methods/1` returned :error."
-
-                {:error, _} = err ->
-                  raise "Update fun mailformed :methods key. While fixing, `Conn.methods/1` returned #{
-                          inspect(err)
-                        }."
-
-                {methods, conn} ->
-                  %{info | methods: methods, conn: conn}
-
-                methods ->
-                  %{info | methods: methods}
-              end
-            end
-          else
+          if info.methods && is_list(info.methods) do
             info
+          else
+            add_methods(info)
           end
-        end)
-      end
+        else
+          info
+        end
+      end)
     end
 
     :ok
@@ -465,34 +457,23 @@ defmodule Conn.Pool do
   end
 
   # Returns {:ok, ids} | {:error, :resources} | {:error, method}
-  # | {:error, filter}
+  # | {:error, filter}.
   defp filter(pool, resource, method, filter) when is_function(filter, 1) do
     conns = AgentMap.get(pool, :conns)
     resources = AgentMap.get(pool, :resources, & &1)
+
+    import Enum
     ids = resources[resource]
+    ids = map(ids || [], &{&1, conns[&1]})
 
-    if ids do
-      ids_and_infos =
-        for id <- ids, info = conns[id], not info.closed, method in info.methods do
-          {id, info}
-        end
-
-      if ids_and_infos == [] do
-        {:error, :method}
-      else
-        ids =
-          for {id, info} <- ids_and_infos, p = filter.(info), p do
-            id
-          end
-
-        if ids == [] do
-          {:error, :filter}
-        else
-          {:ok, ids}
-        end
-      end
+    with {_, [_ | _] = ids} <- {:r, filter(ids, fn {_, c} -> not c.closed end)},
+         {_, [_ | _] = ids} <- {:m, filter(ids, fn {_, c} -> method in c.methods end)},
+         {_, [_ | _] = ids} <- {:f, filter(ids, fn {_, c} -> filter.(c) end)} do
+      {:ok, for({id, _} <- ids, do: id)}
     else
-      {:error, :resource}
+      {:r, []} -> {:error, :resource}
+      {:m, []} -> {:error, :method}
+      {:f, []} -> {:error, :filter}
     end
   end
 
@@ -505,7 +486,14 @@ defmodule Conn.Pool do
           Map.update(map, res, [id], &[id | &1])
         end)
 
-        %{info | conn: conn, closed: false, last_init: System.system_time()}
+        %{
+          info
+          | conn: conn,
+            closed: false,
+            last_init: System.system_time(),
+            last_call: :never,
+            timeout: 0
+        }
 
       {:error, reason, :infinity, conn} ->
         info = %{info | conn: conn}
@@ -579,7 +567,8 @@ defmodule Conn.Pool do
   defp to_native(ms), do: System.convert_time_unit(ms, :milliseconds, :native)
 
   defp expired?(%{ttl: :infinity}), do: false
-  defp expired?(info), do: IO.inspect(info.last_init) + IO.inspect(to_native(info.ttl)) < IO.inspect(System.system_time())
+
+  defp expired?(info), do: info.last_init + to_native(info.ttl) < System.system_time()
 
   defp _call(%{closed: true} = info, {pool, resource, method, filter, _payload} = args) do
     case select(pool, resource, method, filter) do
@@ -598,17 +587,16 @@ defmodule Conn.Pool do
     id = Process.get(:"$key")
 
     if expired?(info) do
-      info = %{info | closed: true}
-      IO.inspect(info)
       delete(pool, id)
       if info.revive, do: revive(pool, id, info)
-      _call(info, args)
+      _call(%{info | closed: true}, args)
     else
       start = System.system_time()
       timeout = to_native(info.timeout)
 
       # Time to wait.
-      ttw = info.last_call + timeout - start
+      last_call = info.last_call
+      ttw = if last_call == :never, do: 0, else: last_call + timeout - start
 
       if to_ms(ttw) < 50 do
         Process.sleep(if ttw < 0, do: 0, else: ttw)
@@ -616,53 +604,67 @@ defmodule Conn.Pool do
         case Conn.call(info.conn, method, payload) do
           {:ok, :closed, conn} ->
             delete(pool, id)
-            info = update_stats(info, method, start)
-            info = %{info | conn: conn, closed: true}
+
+            info =
+              info
+              |> update_stats(method, start)
+              |> Map.put(:conn, conn)
+
             if info.revive == :force, do: revive(pool, id, info)
-            {:ok, info}
+
+            {:ok, %{info | closed: true}}
 
           {:ok, reply, :closed, conn} ->
             delete(pool, id)
-            info = %{info | conn: conn, closed: true}
-            info = update_stats(info, method, start)
+
+            info =
+              info
+              |> update_stats(method, start)
+              |> Map.put(:conn, conn)
+              |> Map.put(:last_call, System.system_time())
+
             if info.revive == :force, do: revive(pool, id, info)
-            {{:ok, reply}, info}
+            {{:ok, reply}, %{info | closed: true}}
 
           {:ok, timeout, conn} ->
-            info = update_stats(info, method, start)
-            info = %{info | conn: conn, timeout: timeout}
+            info =
+              info
+              |> update_stats(method, start)
+              |> Map.put(:conn, conn)
+              |> Map.put(:last_call, System.system_time())
+              |> Map.put(:timeout, timeout)
+
             {:ok, info}
 
           {:ok, reply, timeout, conn} ->
-            info = update_stats(info, method, start)
-            info = %{info | conn: conn, timeout: timeout}
+            info =
+              info
+              |> update_stats(method, start)
+              |> Map.put(:conn, conn)
+              |> Map.put(:last_call, System.system_time())
+              |> Map.put(:timeout, timeout)
+
             {{:ok, reply}, info}
 
           {:error, :closed} ->
             delete(pool, id)
-            info = %{info | closed: true}
-
-            case select(pool, resource, method, filter) do
-              {:ok, id} ->
-                fun = &_call(&1, args)
-                if info.revive, do: revive(pool, id, info)
-
-                # Make chain call while not changing conn.
-                {:chain, {id, fun}, info}
-
-              err ->
-                # Return an error while not changing conn.
-                {err, info}
-            end
+            if info.revive, do: revive(pool, id, info)
+            _call(%{info | closed: true}, args)
 
           {:error, reason, :closed, conn} ->
             delete(pool, id)
-            info = %{info | conn: conn, closed: true}
+            info = %{info | conn: conn}
             if info.revive, do: revive(pool, id, info)
-            {{:error, reason}, info}
+
+            {{:error, reason}, %{info | closed: true}}
 
           {:error, reason, timeout, conn} ->
-            info = %{info | conn: conn, timeout: timeout}
+            info =
+              info
+              |> Map.put(:conn, conn)
+              |> Map.put(:timeout, timeout)
+              |> Map.put(:last_call, System.system_time())
+
             {{:error, reason}, info}
 
           err ->

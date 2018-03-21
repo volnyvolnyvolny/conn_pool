@@ -203,8 +203,8 @@ defprotocol Conn do
           methods: [method],
           closed: boolean,
           stats: %{required(method) => {non_neg_integer, pos_integer}},
-          last_call: pos_integer,
-          last_init: pos_integer,
+          last_call: pos_integer | :never,
+          last_init: pos_integer | :never,
           timeout: timeout,
           revive: boolean | :force
         }
@@ -219,8 +219,8 @@ defprotocol Conn do
     closed: false,
     revive: false,
     stats: %{},
-    last_call: System.system_time(),
-    last_init: System.system_time(),
+    last_call: :never,
+    last_init: :never,
     timeout: 0
   ]
 
