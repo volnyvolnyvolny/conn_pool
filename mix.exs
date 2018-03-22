@@ -39,7 +39,7 @@ defmodule ConnPool.Mixfile do
   defp deps do
     [
       {:earmark, "~> 1.2", only: :dev},
-      {:agent_map, git: "git@gitlab.com:flomop/agent_map.git", app: false},
+      {:agent_map, git: "git@gitlab.com:flomop/agent_map.git"},
       {:ex_doc, "~> 0.18", only: :dev},
       {:credo, "~> 0.8", only: :dev}
     ]
