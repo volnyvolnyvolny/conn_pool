@@ -116,8 +116,7 @@ defmodule Conn.Pool do
   """
   @spec start_link(GenServer.options()) :: GenServer.on_start()
   def start_link(opts \\ []) do
-    conns_f = fn -> AgentMap.new() end
-    AgentMap.start_link([conns: conns_f, resources: fn -> %{} end] ++ opts)
+    AgentMap.start_link(opts)
   end
 
   @doc """
@@ -125,8 +124,7 @@ defmodule Conn.Pool do
   """
   @spec start(GenServer.options()) :: GenServer.on_start()
   def start(opts \\ []) do
-    conns_f = fn -> AgentMap.new() end
-    AgentMap.start([conns: conns_f, resources: fn -> %{} end] ++ opts)
+    AgentMap.start_link(opts)
   end
 
   @doc """
@@ -178,13 +176,12 @@ defmodule Conn.Pool do
   end
 
   defp add(pool, info) do
-    conns = AgentMap.get(pool, :conns)
     id = gen_id()
-    AgentMap.put(conns, id, info)
+    AgentMap.put(pool, {:conn, id}, info)
 
-    AgentMap.update(pool, :resources, fn map ->
-      res = Conn.resource(info.conn)
-      Map.update(map, res, [id], &[id | &1])
+    AgentMap.update(pool, {:res, Conn.resource(info.conn)}, fn
+      nil -> [id]
+      ids -> [id | ids]
     end)
 
     id
@@ -286,30 +283,24 @@ defmodule Conn.Pool do
   """
   @spec pop(Conn.Pool.t(), Conn.id()) :: {:ok, Conn.info()} | :error
   def pop(pool, id) when is_integer(id) do
-    conns = AgentMap.get(pool, :conns)
-    info = conns[id]
+    with {:ok, info} <- AgentMap.fetch(pool, {:conn, id}) do
+      AgentMap.delete(pool, {:conn, id})
 
-    if info do
       res = Conn.resource(info.conn)
-      AgentMap.delete(conns, id)
 
-      AgentMap.cast(pool, :resources, fn map ->
-        case Map.fetch(map, res) do
-          {:ok, [^id]} ->
-            Map.delete(map, res)
+      AgentMap.cast(
+        pool,
+        fn
+          [[^id]] ->
+            :drop
 
-          {:ok, ids} ->
-            ids = List.delete(ids, id)
-            Map.put(map, res, ids)
-
-          :error ->
-            map
-        end
-      end)
+          [ids] when is_list(ids) ->
+            [List.delete(ids, id)]
+        end,
+        [{:res, res}]
+      )
 
       {:ok, info}
-    else
-      :error
     end
   end
 
@@ -318,16 +309,11 @@ defmodule Conn.Pool do
   """
   @spec pop(Conn.Pool.t(), Conn.resource(), filter) :: [Conn.info()]
   def pop(pool, resource, filter) when is_function(filter, 1) do
-    conns = AgentMap.get(pool, :conns)
-    resources = AgentMap.get(pool, :resources, & &1)
-    ids = resources[resource]
+    pool = AgentMap.new(pool)
+    ids = pool[{:res, resource}] || []
 
-    if ids do
-      for id <- ids, filter.(conns[id]) do
-        pop(pool, id)
-      end
-    else
-      []
+    for id <- ids, filter.(pool[{:conn, id}]) do
+      pop(pool, id)
     end
   end
 
@@ -337,11 +323,10 @@ defmodule Conn.Pool do
   """
   @spec map(Conn.Pool.t(), Conn.resource(), (Conn.info() -> a)) :: [a] when a: var
   def map(pool, resource, fun) when is_function(fun, 1) do
-    conns = AgentMap.get(pool, :conns)
-    resources = AgentMap.get(pool, :resources, & &1)
-    ids = resources[resource] || []
+    pool = AgentMap.new(pool)
+    ids = pool[{:res, resource}] || []
 
-    for id <- ids, do: fun.(conns[id])
+    for id <- ids, do: fun.(pool[{:conn, id}])
   end
 
   defp add_methods(info) do
@@ -351,8 +336,8 @@ defmodule Conn.Pool do
 
       {:error, _} = err ->
         raise "Update fun mailformed :methods key. While fixing, `Conn.methods/1` returned #{
-        inspect(err)
-        }."
+                inspect(err)
+              }."
 
       {methods, conn} ->
         %{info | methods: methods, conn: conn}
@@ -409,12 +394,11 @@ defmodule Conn.Pool do
   """
   @spec update(Conn.Pool.t(), Conn.resource(), filter, (Conn.info() -> Conn.info())) :: :ok
   def update(pool, resource, filter, fun) when is_function(fun, 1) and is_function(filter, 1) do
-    conns = AgentMap.get(pool, :conns)
-    resources = AgentMap.get(pool, :resources, & &1)
-    ids = resources[resource] || []
+    pool = AgentMap.new(pool)
+    ids = pool[{:res, resource}] || []
 
     for id <- ids do
-      AgentMap.update(conns, id, fn info ->
+      AgentMap.update(pool, {:conn, id}, fn info ->
         if filter.(info) do
           info = fun.(info)
 
@@ -437,13 +421,9 @@ defmodule Conn.Pool do
   """
   @spec empty?(Conn.Pool.t(), Conn.resource()) :: boolean
   def empty?(pool, resource) do
-    resources = AgentMap.get(pool, :resources, & &1)
-
-    case resources[resource] do
-      nil -> true
-      [] -> true
-      _ -> false
-    end
+    pool
+    |> AgentMap.get({:res, resource}, [])
+    |> Enum.empty?()
   end
 
   @doc """
@@ -459,12 +439,11 @@ defmodule Conn.Pool do
   # Returns {:ok, ids} | {:error, :resources} | {:error, method}
   # | {:error, filter}.
   defp filter(pool, resource, method, filter) when is_function(filter, 1) do
-    conns = AgentMap.get(pool, :conns)
-    resources = AgentMap.get(pool, :resources, & &1)
+    pool = AgentMap.new(pool)
+    ids = pool[{:res, resource}] || []
 
     import Enum
-    ids = resources[resource]
-    ids = map(ids || [], &{&1, conns[&1]})
+    ids = map(ids, &{&1, pool[{:conn, &1}]})
 
     with {_, [_ | _] = ids} <- {:r, filter(ids, fn {_, c} -> not c.closed end)},
          {_, [_ | _] = ids} <- {:m, filter(ids, fn {_, c} -> method in c.methods end)},
@@ -482,8 +461,9 @@ defmodule Conn.Pool do
       {:ok, conn} ->
         res = Conn.resource(conn)
 
-        AgentMap.cast(pool, :resources, fn map ->
-          Map.update(map, res, [id], &[id | &1])
+        AgentMap.cast(pool, {:res, res}, fn
+          nil -> [id]
+          ids -> [id | ids]
         end)
 
         %{
@@ -522,16 +502,14 @@ defmodule Conn.Pool do
   end
 
   defp revive(pool, id, info) do
-    conns = AgentMap.get(pool, :conns)
-
-    AgentMap.cast(conns, id, fn nil ->
+    AgentMap.cast(pool, {:conn, id}, fn nil ->
       _revive(pool, id, info)
     end)
   end
 
   # Estimated time to wait until call can be made on this id.
-  defp waiting_time(conns, id) do
-    with {:ok, info} <- AgentMap.fetch(conns, id) do
+  defp waiting_time(pool, id) do
+    with {:ok, info} <- AgentMap.fetch(pool, {:conn, id}) do
       {sum, n} =
         Enum.reduce(info.stats, {0, 0}, fn {_key, {avg, num}}, {sum, n} ->
           {sum + avg * num, n + num}
@@ -540,17 +518,15 @@ defmodule Conn.Pool do
       if n == 0 do
         {:ok, info.timeout}
       else
-        {:ok, sum / n * AgentMap.queue_len(conns, id) + info.timeout}
+        {:ok, sum / n * AgentMap.queue_len(pool, {:conn, id}) + info.timeout}
       end
     end
   end
 
   # Select the best conn.
   defp select(pool, resource, method, filter) do
-    conns = AgentMap.get(pool, :conns)
-
     with {:ok, ids} <- filter(pool, resource, method, filter) do
-      {:ok, Enum.min_by(ids, &waiting_time(conns, &1))}
+      {:ok, Enum.min_by(ids, &waiting_time(pool, &1))}
     end
   end
 
@@ -575,7 +551,7 @@ defmodule Conn.Pool do
       {:ok, id} ->
         fun = &_call(&1, args)
         # Make chain call while not changing conn.
-        {:chain, {id, fun}, info}
+        {:chain, {{:conn, id}, fun}, info}
 
       err ->
         # Return an error while not changing conn.
@@ -674,11 +650,10 @@ defmodule Conn.Pool do
       else
         # ttw > 50 ms.
         with {:ok, id} <- select(pool, resource, method, filter),
-             conns = AgentMap.get(pool, :conns),
-             {:ok, potential_ttw} <- waiting_time(conns, id),
+             {:ok, potential_ttw} <- waiting_time(pool, id),
              true <- ttw > potential_ttw do
           fun = &_call(&1, args)
-          {:chain, {id, fun}, info}
+          {:chain, {{:conn, id}, fun}, info}
         else
           _ ->
             Process.sleep(20)
@@ -724,10 +699,12 @@ defmodule Conn.Pool do
   end
 
   def call(pool, resource, method, filter, payload) when is_function(filter, 1) do
-    conns = AgentMap.get(pool, :conns)
-
     with {:ok, id} <- select(pool, resource, method, filter) do
-      AgentMap.get_and_update(conns, id, &_call(&1, {pool, resource, method, filter, payload}))
+      AgentMap.get_and_update(
+        pool,
+        {:conn, id},
+        &_call(&1, {pool, resource, method, filter, payload})
+      )
     end
   end
 
@@ -761,8 +738,7 @@ defmodule Conn.Pool do
   @spec extra(Conn.Pool.t(), id, any) :: {:ok, any} | :error
   def extra(pool, id, extra) do
     with {:ok, info} <- info(pool, id) do
-      conns = AgentMap.get(pool, :conns)
-      AgentMap.put(conns, id, %{info | extra: extra})
+      AgentMap.put(pool, {:conn, id}, %{info | extra: extra})
       {:ok, info.extra}
     end
   end
@@ -786,11 +762,6 @@ defmodule Conn.Pool do
   """
   @spec info(Conn.Pool.t(), id) :: {:ok, %Conn{}} | :error
   def info(pool, id) when is_integer(id) do
-    conns = AgentMap.get(pool, :conns)
-
-    AgentMap.get(conns, id, fn
-      nil -> :error
-      info -> {:ok, info}
-    end)
+    AgentMap.fetch(pool, {:conn, id})
   end
 end
