@@ -115,17 +115,13 @@ defmodule Conn.Pool do
   Starts pool as a linked process.
   """
   @spec start_link(GenServer.options()) :: GenServer.on_start()
-  def start_link(opts \\ []) do
-    AgentMap.start_link(opts)
-  end
+  def start_link(opts \\ []), do: AgentMap.start_link(opts)
 
   @doc """
   Starts pool. See `start_link/2` for details.
   """
   @spec start(GenServer.options()) :: GenServer.on_start()
-  def start(opts \\ []) do
-    AgentMap.start_link(opts)
-  end
+  def start(opts \\ []), do: AgentMap.start(opts)
 
   @doc """
   Initialize connection in a separate `Task` and use `put/2` to add connection
@@ -179,7 +175,8 @@ defmodule Conn.Pool do
     id = gen_id()
     AgentMap.put(pool, {:conn, id}, info)
 
-    AgentMap.update(pool, {:res, Conn.resource(info.conn)}, fn
+    r = Conn.resource(info.conn)
+    AgentMap.update(pool, {:res, r}, fn
       nil -> [id]
       ids -> [id | ids]
     end)
@@ -285,19 +282,19 @@ defmodule Conn.Pool do
   def pop(pool, id) when is_integer(id) do
     with {:ok, info} <- AgentMap.fetch(pool, {:conn, id}) do
       AgentMap.delete(pool, {:conn, id})
-
-      res = Conn.resource(info.conn)
-
       AgentMap.cast(
         pool,
         fn
           [[^id]] ->
             :drop
 
-          [ids] when is_list(ids) ->
+          [ids] ->
             [List.delete(ids, id)]
+
+          [nil] ->
+            :id
         end,
-        [{:res, res}]
+        [{:res, Conn.resource(info.conn)}]
       )
 
       {:ok, info}
@@ -421,9 +418,7 @@ defmodule Conn.Pool do
   """
   @spec empty?(Conn.Pool.t(), Conn.resource()) :: boolean
   def empty?(pool, resource) do
-    pool
-    |> AgentMap.get({:res, resource}, [])
-    |> Enum.empty?()
+    not AgentMap.has_key?(pool, {:res, resource})
   end
 
   @doc """
@@ -432,8 +427,11 @@ defmodule Conn.Pool do
   @spec resources(Conn.Pool.t()) :: [Conn.resource()]
   def resources(pool) do
     pool
-    |> AgentMap.get(:resources, & &1)
-    |> Map.keys()
+    |> AgentMap.keys()
+    |> Enum.flat_map(fn
+      {:res, r} -> [r]
+      _ -> []
+    end)
   end
 
   # Returns {:ok, ids} | {:error, :resources} | {:error, method}
@@ -443,7 +441,7 @@ defmodule Conn.Pool do
     ids = pool[{:res, resource}] || []
 
     import Enum
-    ids = map(ids, &{&1, pool[{:conn, &1}]})
+    ids = for id <- ids, do: {id, pool[{:conn, id}]}
 
     with {_, [_ | _] = ids} <- {:r, filter(ids, fn {_, c} -> not c.closed end)},
          {_, [_ | _] = ids} <- {:m, filter(ids, fn {_, c} -> method in c.methods end)},
@@ -539,12 +537,19 @@ defmodule Conn.Pool do
     end)
   end
 
-  defp to_ms(native), do: System.convert_time_unit(native, :native, :milliseconds)
-  defp to_native(ms), do: System.convert_time_unit(ms, :milliseconds, :native)
+  defp to_ms(native) do
+    System.convert_time_unit(native, :native, :milliseconds)
+  end
+
+  defp to_native(ms) do
+    System.convert_time_unit(ms, :milliseconds, :native)
+  end
 
   defp expired?(%{ttl: :infinity}), do: false
 
-  defp expired?(info), do: info.last_init + to_native(info.ttl) < System.system_time()
+  defp expired?(info) do
+    info.last_init + to_native(info.ttl) < System.system_time()
+  end
 
   defp _call(%{closed: true} = info, {pool, resource, method, filter, _payload} = args) do
     case select(pool, resource, method, filter) do
@@ -572,7 +577,13 @@ defmodule Conn.Pool do
 
       # Time to wait.
       last_call = info.last_call
-      ttw = if last_call == :never, do: 0, else: last_call + timeout - start
+
+      ttw =
+        if last_call == :never do
+          0
+        else
+          last_call + timeout - start
+        end
 
       if to_ms(ttw) < 50 do
         Process.sleep(if ttw < 0, do: 0, else: ttw)
@@ -586,7 +597,9 @@ defmodule Conn.Pool do
               |> update_stats(method, start)
               |> Map.put(:conn, conn)
 
-            if info.revive == :force, do: revive(pool, id, info)
+            if info.revive == :force do
+              revive(pool, id, info)
+            end
 
             {:ok, %{info | closed: true}}
 
@@ -599,7 +612,10 @@ defmodule Conn.Pool do
               |> Map.put(:conn, conn)
               |> Map.put(:last_call, System.system_time())
 
-            if info.revive == :force, do: revive(pool, id, info)
+            if info.revive == :force do
+              revive(pool, id, info)
+            end
+
             {{:ok, reply}, %{info | closed: true}}
 
           {:ok, timeout, conn} ->
@@ -624,13 +640,20 @@ defmodule Conn.Pool do
 
           {:error, :closed} ->
             delete(pool, id)
-            if info.revive, do: revive(pool, id, info)
+
+            if info.revive do
+              revive(pool, id, info)
+            end
+
             _call(%{info | closed: true}, args)
 
           {:error, reason, :closed, conn} ->
             delete(pool, id)
             info = %{info | conn: conn}
-            if info.revive, do: revive(pool, id, info)
+
+            if info.revive do
+              revive(pool, id, info)
+            end
 
             {{:error, reason}, %{info | closed: true}}
 
