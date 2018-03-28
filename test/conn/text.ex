@@ -25,11 +25,7 @@ defimpl Conn, for: TextConn do
 
   def call(%_{res: pid} = c, cmd, args \\ "") do
     if Process.alive?(pid) do
-      if args do
-        send(pid, {self(), ":#{cmd}:#{args}"})
-      else
-        send(pid, {self(), ":#{cmd}"})
-      end
+      send(pid, {self(), args && ":#{cmd}:#{args}" || ":#{cmd}"})
 
       receive do
         "ok" ->

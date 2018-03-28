@@ -56,11 +56,7 @@ defprotocol Conn do
 
         def call(%_{res: pid}=c, cmd, args \\\\ nil) when is_binary(args) do
           if Process.alive?(pid) do
-            if args do
-              send(pid, {self(), ":\#{cmd}:\#{args}"})
-            else
-              send(pid, {self(), ":\#{cmd}"})
-            end
+            send(pid, {self(), args && ":\#{cmd}:\#{args}" || ":\#{cmd}"})
 
             receive do
               "ok" ->
@@ -91,8 +87,8 @@ defprotocol Conn do
         def parse(conn, ":COMMANDS" <> _), do: {:ok, :methods, ""}
 
         def parse(conn, ":" <> data) do
-          case Regex.named_captures(~r[(?<cmd>.*)(:(?<args>.*))?;(?<rest>.*)], data) do
-            %{"cmd" => cmd, "args" => args, "rest" => _} ->
+          case Regex.named_captures(~r[(?<cmd>.*)(:(?<args>.*))?], data) do
+            %{"cmd" => cmd, "args" => args} ->
               {:ok, {:call, cmd, args}, ""}
 
             nil ->
@@ -109,59 +105,59 @@ defprotocol Conn do
   integer value and supports commands `INC`, `GET` and `STOP`.
 
       iex> defmodule Server do
-      ...>   def loop(data, state \\\\ 0) do
+      ...>   def loop(state \\\\ 0) do
       ...>     receive do
       ...>       {pid, data} ->
       ...>         case Conn.parse(%TextConn{}, data) do
-      ...>           {:error, {:parse,_}, rest} ->
+      ...>           {:error, {:parse, _}, _rest} ->
       ...>              send(pid, "err:parse")
-      ...>              loop(rest, state)
+      ...>              loop(state)
       ...>
-      ...>           {:ok, :methods, rest} ->
+      ...>           {:ok, :methods, _rest} ->
       ...>              send(pid, "ok:INC,GET,STOP")
-      ...>              loop(rest, state)
+      ...>              loop(state)
       ...>
-      ...>           {:ok, {:call, "INC", ""}, rest} ->
-      ...>              send(pid, "ok:"<>state+1)
-      ...>              loop(rest, state+1)
+      ...>           {:ok, {:call, "INC", ""}, _rest} ->
+      ...>              send(pid, "ok:\#{state+1}")
+      ...>              loop(state+1)
       ...>
-      ...>           {:ok, {:call, "GET", ""}, rest} ->
-      ...>              send(pid, "ok:"<>state)
-      ...>              loop(rest, state)
+      ...>           {:ok, {:call, "GET", ""}, _rest} ->
+      ...>              send(pid, "ok:\#{state}")
+      ...>              loop(state)
       ...>
-      ...>           {:ok, {:call, "STOP", ""},_rest} ->
+      ...>           {:ok, {:call, "STOP", ""}, _rest} ->
       ...>              send(pid, "ok")
       ...>
-      ...>           {:ok, {:call, _, ""},_rest} ->
+      ...>           {:ok, {:call, _, ""}, _rest} ->
       ...>              send(pid, "err:notsupported")
-      ...>              loop(rest, state)
+      ...>              loop(state)
       ...>
-      ...>           {:ok, {:call, _, _},_rest} ->
+      ...>           {:ok, {:call, _, _}, _rest} ->
       ...>              send(pid, "err:badarg")
-      ...>              loop(rest, state)
+      ...>              loop(state)
       ...>         end
       ...>     end
       ...>   end
       ...> end
       ...>
       ...>
-      iex> pid = spawn_link(fn -> Server.loop("") end)
+      iex> res = spawn_link(&Server.loop/0)
       iex> {:ok, pool} = Conn.Pool.start_link()
       iex> Conn.Pool.init(pool, %TextConn{}, pid)
-      iex> Conn.Pool.call(pool, pid, "GET")
+      iex> Conn.Pool.call(pool, res, "GET")
       {:ok, 0}
-      iex> Conn.Pool.call(pool, pid, "INC")
+      iex> Conn.Pool.call(pool, res, "INC")
       {:ok, 1}
-      iex> Conn.Pool.call(pool, pid, "DEC")
+      iex> Conn.Pool.call(pool, res, "DEC")
       {:error, :notsupported}
-      iex> Conn.Pool.call(pool, pid, "INC", :badarg)
+      iex> Conn.Pool.call(pool, res, "INC", :badarg)
       {:error, "badarg"}
-      iex> Conn.Pool.call(pool, pid, "STOP")
+      iex> Conn.Pool.call(pool, res, "STOP")
       :ok
-      iex> Conn.Pool.call(pool, pid, "GET")
+      iex> Conn.Pool.call(pool, res, "GET")
       {:error, :closed}
 
-  Now `TextConn` could be used to connect to *any* server that implements above
+  `TextConn` could be used to connect to *any* server that implements above
   protocol.
   """
 
