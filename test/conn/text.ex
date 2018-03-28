@@ -3,8 +3,6 @@ defmodule(TextConn, do: defstruct([:res]))
 defimpl Conn, for: TextConn do
   def init(conn, pid) do
     if Process.alive?(pid) do
-      # take available methods
-      {_, conn} = Conn.methods(conn)
       {:ok, %{conn | res: pid}}
     else
       {:error, :dead, :infinity, conn}
@@ -13,35 +11,33 @@ defimpl Conn, for: TextConn do
 
   def resource(%_{res: pid}), do: pid
 
-  def methods(%_{res: pid}) do
-    unless Process.alive?(pid) do
-      :error
-    else
-      send(pid, {self(), ":COMMANDS;"})
+  def methods!(%_{res: pid}) do
+    send(pid, {self(), ":COMMANDS"})
 
-      receive do
-        "ok:" <> cmds ->
-          String.split(cmds, ",")
+    receive do
+      "ok:" <> cmds ->
+        String.split(cmds, ",")
 
-          # after 5000 -> :error # — no need, pool will handle this.
-      end
+      _ ->
+        :error
     end
   end
 
   def call(%_{res: pid} = c, cmd, args \\ "") do
-    unless Process.alive?(pid) do
-      {:error, :closed}
-    else
-      send(pid, {self(), if(args == "", do: ":#{cmd};", else: ":#{cmd}:#{args};")})
+    if Process.alive?(pid) do
+      if args do
+        send(pid, {self(), ":#{cmd}:#{args}"})
+      else
+        send(pid, {self(), ":#{cmd}"})
+      end
 
       receive do
-        "ok;" ->
+        "ok" ->
           {:ok, 0, c}
 
         "ok:" <> reply ->
           {:ok, reply, 0, c}
 
-        # Suggests timeout 50 ms.
         "err:notsupported" ->
           {:error, :notsupported, 50, c}
 
@@ -51,29 +47,25 @@ defimpl Conn, for: TextConn do
         5000 ->
           {:error, :timeout, 0, c}
       end
+    else
+      {:error, :closed}
     end
   end
 
   def parse(_conn, ""), do: :ok
-  def parse(_conn, ":COMMANDS;" <> rest), do: {:ok, :methods, rest}
+  def parse(_conn, ":COMMANDS" <> _), do: {:ok, :methods, ""}
 
   def parse(_conn, ":" <> data) do
-    case Regex.named_captures(~r[(?<cmd>.*)(:(?<args>.*))?;(?<rest>.*)], data) do
-      %{"cmd" => cmd, "args" => args, "rest" => rest} ->
-        {:ok, {:call, cmd, args}, rest}
+    case Regex.named_captures(~r[(?<cmd>.*)(:(?<args>.*))?], data) do
+      %{"cmd" => cmd, "args" => args} ->
+        {:ok, {:call, cmd, args}, ""}
 
       nil ->
-        {:error, :needmoredata}
+        {:error, {:parse, data}, ""}
     end
   end
 
   def parse(_conn, malformed) do
-    case String.split(malformed, ";") do
-      [malformed, rest] ->
-        {:error, {:parse, malformed}, rest}
-
-      _ ->
-        {:error, :needmoredata}
-    end
+    {:error, {:parse, malformed}, ""}
   end
 end

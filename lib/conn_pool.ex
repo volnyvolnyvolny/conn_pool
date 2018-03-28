@@ -16,7 +16,7 @@ defmodule Conn.Pool do
   In the following examples, `%Conn.Agent{}` represents connection to some
   `Agent` that can be created separately or via `Conn.init/2`. Available methods
   of interaction with `Agent` are `:get`, `:get_and_update`, `:update` and
-  `:stop` (see `Conn.methods/1`). This type of connection means to exist only as
+  `:stop` (see `Conn.methods!/1`). This type of connection means to exist only as
   an example for doctests. More meaningful example would be `Conn.Plug` wrapper.
   Also, see `Conn` docs for detailed example on `Conn` protocol implementation
   and use.
@@ -54,7 +54,7 @@ defmodule Conn.Pool do
       iex> {:ok, pool} = Conn.Pool.start_link()
       iex> {:ok, agent} = Agent.start_link(fn -> 42 end)
       iex> {:ok, conn} = Conn.init(%Conn.Agent{}, res: agent)
-      iex> Conn.Pool.put(pool, %Conn{conn: conn, revive: true})
+      iex> Conn.Pool.put!(pool, %Conn{conn: conn, revive: true})
       iex> Process.alive?(agent) && not Conn.Pool.empty?(pool, agent)
       true
       # There are conns for resource `agent` in this pool.
@@ -136,11 +136,10 @@ defmodule Conn.Pool do
       the identifier that can be used to refer `conn`;
     * `{:error, :timeout}` if `Conn.init/2` returns `{:ok, :timeout}` or
       initialization spended more than `%Conn{}.init_timeout` ms.
-    * `{:error, :methods}` if `Conn.methods/1` returns `:error`.
     * `{:error, reason}` in case `Conn.init/2` returns arbitrary error.
   """
   @spec init(Conn.Pool.t(), Conn.t() | Conn.info(), any) ::
-          {:ok, id} | {:error, :timeout | :methods | reason}
+          {:ok, id} | {:error, :timeout | reason}
 
   def init(pool, info_or_conn, init_args \\ nil)
 
@@ -152,7 +151,7 @@ defmodule Conn.Pool do
 
     case Task.yield(task, :infinity) || Task.shutdown(task) do
       {:ok, {:ok, conn}} ->
-        put(pool, %{info | conn: conn, init_args: init_args})
+        {:ok, put!(pool, %{info | conn: conn, init_args: init_args})}
 
       {:ok, err} ->
         err
@@ -166,7 +165,7 @@ defmodule Conn.Pool do
     init(pool, %Conn{conn: conn}, init_args)
   end
 
-  # add conn to pool
+  # Add conn to pool.
   defp add(pool, %{last_init: :never} = info) do
     add(pool, %{info | last_init: System.system_time()})
   end
@@ -176,6 +175,7 @@ defmodule Conn.Pool do
     AgentMap.put(pool, {:conn, id}, info)
 
     r = Conn.resource(info.conn)
+
     AgentMap.update(pool, {:res, r}, fn
       nil -> [id]
       ids -> [id | ids]
@@ -184,17 +184,32 @@ defmodule Conn.Pool do
     id
   end
 
+  defp add_methods!(info) do
+    if info.methods && is_list(info.methods) do
+      info
+    else
+      case Conn.methods!(info.conn) do
+        {methods, conn} when is_list(methods) ->
+          %{info | methods: methods, conn: conn}
+
+        methods when is_list(methods) ->
+          %{info | methods: methods}
+
+        ret ->
+          raise("""
+            Conn.methods/1 call expected to return [method]
+            or {[method], updated conn}, but instead #{inspect(ret)} returned.
+          """)
+      end
+    end
+  end
+
   @doc """
   Adds given `%Conn{}` to pool, returning id to refer `info.conn` in future.
 
-  Put will refresh data in `%Conn{}.methods` with `Conn.methods/1` call.
+  Put will refresh data in `%Conn{}.methods` with `Conn.methods/1`.
 
-  ## Returns
-
-    * `{:ok, id}`;
-    * `{:error, :methods}` if `Conn.methods/1` call returned `:error`;
-    * `{:error, :timeout}` if execution of `Conn.methods/1` took more than
-      `%Conn{}.init_timeout` ms.
+  Returns `{:ok, id}`.
 
   ## Example
 
@@ -206,7 +221,7 @@ defmodule Conn.Pool do
       ...>   extra: :extra,
       ...>   ttl: ttl
       ...> }
-      iex> {:ok, id} = Conn.Pool.put(pool, info)
+      iex> id = Conn.Pool.put!(pool, info)
       iex> {:ok, info} = Conn.Pool.info(pool, id)
       iex> ^ttl = info.ttl
       iex> {:ok, info} = Conn.Pool.info(pool, id)
@@ -216,28 +231,14 @@ defmodule Conn.Pool do
       # let's make some tweak
       #
       iex> {:ok, info} = Conn.Pool.pop(pool, id)
-      iex> {:ok, id} = Conn.Pool.put(pool, %{info| ttl: :infinity})
+      iex> id = Conn.Pool.put!(pool, %{info| ttl: :infinity})
       iex> {:ok, info} = Conn.Pool.info(pool, id)
       iex> info.ttl
       :infinity
   """
-  @spec put(Conn.Pool.t(), Conn.info()) :: {:ok, id} | {:error, :methods | :timeout}
-  def put(pool, %Conn{conn: conn} = info) do
-    case Conn.methods(conn) do
-      :error ->
-        {:error, :methods}
-
-      {:error, _} ->
-        {:error, :methods}
-
-      {methods, conn} ->
-        info = %{info | methods: methods, conn: conn}
-        {:ok, add(pool, info)}
-
-      methods ->
-        info = %{info | methods: methods}
-        {:ok, add(pool, info)}
-    end
+  @spec put!(Conn.Pool.t(), Conn.info()) :: id
+  def put!(pool, info) do
+    add(pool, add_methods!(info))
   end
 
   defp delete(pool, id), do: pop(pool, id)
@@ -276,12 +277,13 @@ defmodule Conn.Pool do
       iex> Conn.Pool.empty?(pool, agent)
       true
 
-  Also, see example for `put/2`.
+  Also, see example for `put!/2`.
   """
   @spec pop(Conn.Pool.t(), Conn.id()) :: {:ok, Conn.info()} | :error
   def pop(pool, id) when is_integer(id) do
     with {:ok, info} <- AgentMap.fetch(pool, {:conn, id}) do
       AgentMap.delete(pool, {:conn, id})
+
       AgentMap.cast(
         pool,
         fn
@@ -324,24 +326,6 @@ defmodule Conn.Pool do
     ids = pool[{:res, resource}] || []
 
     for id <- ids, do: fun.(pool[{:conn, id}])
-  end
-
-  defp add_methods(info) do
-    case Conn.methods(info.conn) do
-      :error ->
-        raise "Update fun mailformed :methods key. While fixing, `Conn.methods/1` returned :error."
-
-      {:error, _} = err ->
-        raise "Update fun mailformed :methods key. While fixing, `Conn.methods/1` returned #{
-                inspect(err)
-              }."
-
-      {methods, conn} ->
-        %{info | methods: methods, conn: conn}
-
-      methods ->
-        %{info | methods: methods}
-    end
   end
 
   @doc """
@@ -394,15 +378,21 @@ defmodule Conn.Pool do
     pool = AgentMap.new(pool)
     ids = pool[{:res, resource}] || []
 
+    self = self()
+
     for id <- ids do
       AgentMap.update(pool, {:conn, id}, fn info ->
         if filter.(info) do
-          info = fun.(info)
+          try do
+            add_methods!(fun.(info))
+          rescue
+            e ->
+              Process.exit(self, """
+              Error while making Conn.methods!/1 call on #{inspect(info.conn)}:
+              #{inspect(Exception.message(e))}.
+              """)
 
-          if info.methods && is_list(info.methods) do
-            info
-          else
-            add_methods(info)
+              info
           end
         else
           info
@@ -426,9 +416,7 @@ defmodule Conn.Pool do
   """
   @spec resources(Conn.Pool.t()) :: [Conn.resource()]
   def resources(pool) do
-    pool
-    |> AgentMap.keys()
-    |> Enum.flat_map(fn
+    Enum.flat_map(AgentMap.keys(pool), fn
       {:res, r} -> [r]
       _ -> []
     end)
@@ -476,11 +464,12 @@ defmodule Conn.Pool do
       {:error, reason, :infinity, conn} ->
         info = %{info | conn: conn}
 
-        Logger.error(
-          "Failed to reinitialize connection. Reason: #{inspect(reason)}. Connection info: #{
-            inspect(info)
-          }.\n\nStop trying."
-        )
+        Logger.error("""
+        Failed to reinitialize connection.
+        Reason: #{inspect(reason)}.
+        Connection info: #{inspect(info)}.
+        Stop trying.
+        """)
 
         delete(pool, id)
         nil
@@ -488,11 +477,12 @@ defmodule Conn.Pool do
       {:error, reason, timeout, conn} ->
         info = %{info | conn: conn}
 
-        Logger.warn(
-          "Failed to reinitialize connection with id #{id}. Reason: #{inspect(reason)}. Connection info: #{
-            inspect(info)
-          }.\n\nWill try again in #{to_ms(timeout)} ms."
-        )
+        Logger.warn("""
+        Failed to reinitialize connection with id #{id}.
+        Reason: #{inspect(reason)}.
+        Connection info: #{inspect(info)}.
+        Will try again in #{to_ms(timeout)} ms.
+        """)
 
         Process.sleep(timeout)
         _revive(pool, id, info)

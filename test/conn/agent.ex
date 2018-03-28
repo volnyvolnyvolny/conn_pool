@@ -32,7 +32,7 @@ defimpl Conn, for: Conn.Agent do
 
   def resource(%_{res: agent}), do: agent
 
-  def methods(_conn), do: [:get, :get_and_update, :update, :stop]
+  def methods!(_conn), do: [:get, :get_and_update, :update, :stop]
 
   def call(conn, method, fun \\ nil)
 

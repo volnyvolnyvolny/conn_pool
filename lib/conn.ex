@@ -1,38 +1,3 @@
-# defmodule Conn.Defaults do
-#   @moduledoc """
-#   Default implementations of optional callbacks of `Conn` protocol:
-#   `Conn.undo/3`. All of them are overridable, and by default
-#   return `{:error, :notsupported}`.
-
-#   Use it like this:
-
-#       defimpl Conn, for: MyConn do
-#         use Conn.Defaults
-
-#         # Callbacks:
-#         def init(_, _), do: …
-#         def resource(_), do: …
-#         def methods(_), do: …
-#         def call(_, _, _), do: …
-
-#         # Optional callbacks:
-#         def undo(_, _, _), do: …
-#         def parse(_,_), do: …
-#       end
-#   """
-
-#   defmacro __using__(_) do
-#     quote do
-
-# #      def undo(_conn,_method,_specs), do: {:error, :notimplemented}
-#       def parse(_conn,_data), do: {:error, :notimplemented}
-
-#       defoverridable [#undo: 3,
-#                       parse: 2]
-#     end
-#   end
-# end
-
 defprotocol Conn do
   @moduledoc """
   High level abstraction that represents connection in the most common sense.
@@ -49,14 +14,15 @@ defprotocol Conn do
 
   ## Example
 
-  Let's implement simple generic text-base interaction protocol. Client can send
-  server commands in the format of `:COMMAND;` or `:COMMAND:ARGS;` to execute
-  `COMMAND` with given `ARGS` or without them. There is a special command
-  `:COMMANDS;` that returns available commands;
+  Let's implement simple generic text-base RPC protocol. Client can send server
+  requests in the form of `:COMMAND` or `:COMMAND:ARGS` to execute `COMMAND`
+  with given `ARGS` or without them. There is a special request `:COMMANDS` to
+  ask for a list of all available commands, that is send in form of
+  `ok:COMMAND1, CMD2,…`.
 
-  Server is the process that may reply with `ok:COMMAND1,CMD2,…`, `ok`,
-  `ok:DATA` or `err:REASON`, where `REASON` could be `notsupported` (command),
-  `badarg`, `parse`, or any other.
+  Server may reply with `ok:COMMAND1,CMD2,…`, `ok`, `ok:DATA` or `err:REASON`,
+  where `REASON` could be `notsupported` (command), `badarg`, `parse`, or any
+  other.
 
   Now simple test conn will look like:
 
@@ -67,43 +33,54 @@ defprotocol Conn do
       defimpl Conn, for: TextConn do
 
         def init(conn, pid) do
-          if Process.alive? pid do
-            {_, conn} = Conn.methods conn # take available methods
+          if Process.alive?(pid) do
             {:ok, %{conn | res: pid}}
           else
-            {:error, :dead, :infinity, conn} # take available methods
+            {:error, :dead, :infinity, conn} 
           end
         end
 
         def resource(%_{res: pid}), do: pid
 
-        def methods(%_{res: pid}=conn) do
-          unless Process.alive? pid do
-            :error
-          else
-            send pid, {self(), ":COMMANDS;"}
-            receive do
-              "ok:"<>cmds -> String.split ","
-            # after 5000 -> :error # no need, pool will handle this
-            end
+        def methods!(%_{res: pid}=conn) do
+          send(pid, {self(), ":COMMANDS"})
+
+          receive do
+            "ok:" <> cmds ->
+              String.split(",")
+
+            _ ->
+              :error
           end
         end
 
-        def call(%_{res: pid}=c, cmd, args \\\\ "") do
-          unless Process.alive? pid do
-            {:error, :closed}
-          else
-            send pid, {self(), if args == "", do: ":\#{cmd};", else: ":\#{cmd}:\#{args};"}
+        def call(%_{res: pid}=c, cmd, args \\\\ nil) when is_binary(args) do
+          if Process.alive?(pid) do
+            if args do
+              send(pid, {self(), ":\#{cmd}:\#{args}"})
+            else
+              send(pid, {self(), ":\#{cmd}"})
+            end
 
             receive do
-              "ok;" ->  {:ok, 0, c}
-              "ok:"<>reply ->  {:ok, reply, 0, c}
+              "ok" ->
+                {:ok, 0, c}
 
-              "err:notsupported" ->  {:error, :notsupported, 50, c} # suggests timeout 50 ms
-              "err:"<>reason ->      {:error, reason, 50, c}
-            after 5000 ->
-              {:error, :timeout, 0, c}
+              "ok:" <> reply ->
+                {:ok, reply, 0, c}
+
+              "err:notsupported" ->
+                # Suggests timeout 50 ms.
+                {:error, :notsupported, 50, c}
+
+              "err:"<>reason ->
+                {:error, reason, 50, c}
+            after
+              5000 ->
+                {:error, :timeout, 0, c}
             end
+          else
+            {:error, :closed}
           end
         end
 
@@ -111,22 +88,19 @@ defprotocol Conn do
   parsing:
 
         def parse(conn, ""), do: :ok
-        def parse(conn, ":COMMANDS;"<>rest), do: {:ok, :methods, rest}
-        def parse(conn, ":"<>data) do
-          case Regex.named_captures ~r[(?<cmd>.*)(:(?<args>.*))?;(?<rest>.*)], data do
-            %{"cmd" => cmd, "args" => args, "rest" => rest} ->
-              {:ok, {:call, cmd, args}, rest}
+        def parse(conn, ":COMMANDS" <> _), do: {:ok, :methods, ""}
+
+        def parse(conn, ":" <> data) do
+          case Regex.named_captures(~r[(?<cmd>.*)(:(?<args>.*))?;(?<rest>.*)], data) do
+            %{"cmd" => cmd, "args" => args, "rest" => _} ->
+              {:ok, {:call, cmd, args}, ""}
+
             nil ->
-              {:error, :needmoredata}
+              {:error, {:parse, data}, ""}
           end
         end
         def parse(conn, malformed) do
-          case String.split data, ";" do
-            [malformed, rest] ->
-              {:error, {:parse, malformed}, rest}
-            _ ->
-              {:error, :needmoredata}
-          end
+          {:error, {:parse, malformed}, ""}
         end
       end
 
@@ -137,12 +111,8 @@ defprotocol Conn do
       iex> defmodule Server do
       ...>   def loop(data, state \\\\ 0) do
       ...>     receive do
-      ...>       {pid, new} ->
-      ...>         data = data<>new
+      ...>       {pid, data} ->
       ...>         case Conn.parse(%TextConn{}, data) do
-      ...>           {:error, :needmoredata} ->
-      ...>              loop(rest, state)
-      ...>
       ...>           {:error, {:parse,_}, rest} ->
       ...>              send(pid, "err:parse")
       ...>              loop(rest, state)
@@ -358,13 +328,15 @@ defprotocol Conn do
     * list of methods available for `call/3`;
     * list of methods available for `call/3` and `updated conn`.
 
+  or raise.
+
   ## Examples
 
-      iex> Conn.methods(%Conn.Agent{})
+      iex> Conn.methods!(%Conn.Agent{})
       [:get, :get_and_update, :update, :stop]
   """
-  @spec methods(Conn.t()) :: [method] | {[method], Conn.t()} | :error
-  def methods(conn)
+  @spec methods!(Conn.t()) :: [method] | {[method], Conn.t()}
+  def methods!(conn)
 
   @type data :: any
   @type rest :: data
