@@ -544,9 +544,10 @@ defmodule Conn.Pool do
   defp _call(%{closed: true} = info, {pool, resource, method, filter, _payload} = args) do
     case select(pool, resource, method, filter) do
       {:ok, id} ->
+        key = {:conn, id}
         fun = &_call(&1, args)
         # Make chain call while not changing conn.
-        {:chain, {{:conn, id}, fun}, info}
+        {{:chain, key, fun}, info}
 
       err ->
         # Return an error while not changing conn.
@@ -555,7 +556,7 @@ defmodule Conn.Pool do
   end
 
   defp _call(info, {pool, resource, method, filter, payload} = args) do
-    id = Process.get(:"$key")
+    {:conn, id} = Process.get(:"$key")
 
     if expired?(info) do
       delete(pool, id)
@@ -713,11 +714,9 @@ defmodule Conn.Pool do
 
   def call(pool, resource, method, filter, payload) when is_function(filter, 1) do
     with {:ok, id} <- select(pool, resource, method, filter) do
-      AgentMap.get_and_update(
-        pool,
-        {:conn, id},
-        &_call(&1, {pool, resource, method, filter, payload})
-      )
+      key = {:conn, id}
+      fun = &_call(&1, {pool, resource, method, filter, payload})
+      AgentMap.get_and_update(pool, key, fun)
     end
   end
 
