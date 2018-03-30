@@ -114,7 +114,7 @@ defmodule Conn.Pool do
   @type filter :: (Conn.info() -> as_boolean(term()))
 
   # Generate uniq id
-  defp gen_id, do: System.system_time()
+  defp gen_id, do: System.monotonic_time()
 
   @doc """
   Starts pool as a linked process.
@@ -172,7 +172,7 @@ defmodule Conn.Pool do
 
   # Add conn to pool.
   defp add(pool, %{last_init: :never} = info) do
-    add(pool, %{info | last_init: System.system_time()})
+    add(pool, %{info | last_init: System.monotonic_time()})
   end
 
   defp add(pool, info) do
@@ -464,7 +464,7 @@ defmodule Conn.Pool do
           info
           | conn: conn,
             closed: false,
-            last_init: System.system_time(),
+            last_init: System.monotonic_time(),
             last_call: :never,
             timeout: 0
         }
@@ -527,7 +527,7 @@ defmodule Conn.Pool do
   end
 
   defp update_stats(info, method, start) do
-    stop = System.system_time()
+    stop = System.monotonic_time()
 
     update_in(info.stats[method], fn
       nil -> {stop - start, 1}
@@ -546,7 +546,7 @@ defmodule Conn.Pool do
   defp expired?(%{ttl: :infinity}), do: false
 
   defp expired?(info) do
-    info.last_init + to_native(info.ttl) < System.system_time()
+    info.last_init + to_native(info.ttl) < System.monotonic_time()
   end
 
   defp _call(%{closed: true} = info, {pool, resource, method, filter, _payload} = args) do
@@ -573,7 +573,7 @@ defmodule Conn.Pool do
       if info.revive, do: revive(pool, id, info)
       _call(%{info | closed: true}, args)
     else
-      start = System.system_time()
+      start = System.monotonic_time()
       timeout = to_native(info.timeout)
 
       # Time to wait.
@@ -611,7 +611,7 @@ defmodule Conn.Pool do
               info
               |> update_stats(method, start)
               |> Map.put(:conn, conn)
-              |> Map.put(:last_call, System.system_time())
+              |> Map.put(:last_call, System.monotonic_time())
 
             if info.revive == :force do
               revive(pool, id, info)
@@ -624,7 +624,7 @@ defmodule Conn.Pool do
               info
               |> update_stats(method, start)
               |> Map.put(:conn, conn)
-              |> Map.put(:last_call, System.system_time())
+              |> Map.put(:last_call, System.monotonic_time())
               |> Map.put(:timeout, timeout)
 
             {:ok, info}
@@ -634,7 +634,7 @@ defmodule Conn.Pool do
               info
               |> update_stats(method, start)
               |> Map.put(:conn, conn)
-              |> Map.put(:last_call, System.system_time())
+              |> Map.put(:last_call, System.monotonic_time())
               |> Map.put(:timeout, timeout)
 
             {{:ok, reply}, info}
@@ -663,7 +663,7 @@ defmodule Conn.Pool do
               info
               |> Map.put(:conn, conn)
               |> Map.put(:timeout, timeout)
-              |> Map.put(:last_call, System.system_time())
+              |> Map.put(:last_call, System.monotonic_time())
 
             {{:error, reason}, info}
 
