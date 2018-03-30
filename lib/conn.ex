@@ -143,13 +143,13 @@ defprotocol Conn do
       ...>
       iex> res = spawn_link(&Server.loop/0)
       iex> {:ok, pool} = Conn.Pool.start_link()
-      iex> Conn.Pool.init(pool, %TextConn{}, pid)
+      iex> Conn.Pool.init(pool, %TextConn{}, res)
       iex> Conn.Pool.call(pool, res, "GET")
-      {:ok, 0}
+      {:ok, "0"}
       iex> Conn.Pool.call(pool, res, "INC")
-      {:ok, 1}
+      {:ok, "1"}
       iex> Conn.Pool.call(pool, res, "DEC")
-      {:error, :notsupported}
+      {:error, :method}
       iex> Conn.Pool.call(pool, res, "INC", :badarg)
       {:error, "badarg"}
       iex> Conn.Pool.call(pool, res, "STOP")
