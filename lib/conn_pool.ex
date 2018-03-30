@@ -87,15 +87,20 @@ defmodule Conn.Pool do
       #
       # Next call will fail because all the conns are expired and conn
       # will not be revived (%Conn{}.revive == false).
+      #
       iex> Conn.Pool.call(pool, agent, :get, & &1)
       {:error, :resource}
       iex> Conn.Pool.resources(pool)
       []
       iex> Conn.Pool.init(pool, %Conn.Agent{}, res: agent)
+      iex> Conn.Pool.call(pool, agent, :get, & &1+1)
+      {:ok, 43}
+      # That's because conn that is alive exists.
+      #
       iex> Conn.Pool.update(pool, agent, & %{&1 | ttl: 10, revive: true})
       iex> :timer.sleep(10)
       iex> Conn.Pool.call(pool, agent, :get, & &1+1)
-      {:ok, 43}
+      {:error, :resource}
 
   ## Name registration
 
@@ -424,12 +429,15 @@ defmodule Conn.Pool do
 
   # Returns {:ok, ids} | {:error, :resources} | {:error, method}
   # | {:error, filter}.
-  defp filter(pool, resource, method, filter) when is_function(filter, 1) do
+  defp filter(pool, resource, method, filter, except: except) when is_function(filter, 1) do
     pool = AgentMap.new(pool)
     ids = pool[{:res, resource}] || []
-
     import Enum
-    ids = for id <- ids, do: {id, pool[{:conn, id}]}
+
+    ids =
+      for id <- ids -- except do
+        {id, pool[{:conn, id}]}
+      end
 
     with {_, [_ | _] = ids} <- {:r, filter(ids, fn {_, c} -> not c.closed end)},
          {_, [_ | _] = ids} <- {:m, filter(ids, fn {_, c} -> method in c.methods end)},
@@ -512,8 +520,8 @@ defmodule Conn.Pool do
   end
 
   # Select the best conn.
-  defp select(pool, resource, method, filter) do
-    with {:ok, ids} <- filter(pool, resource, method, filter) do
+  defp select(pool, resource, method, filter, opts \\ [except: []]) do
+    with {:ok, ids} <- filter(pool, resource, method, filter, opts) do
       {:ok, Enum.min_by(ids, &waiting_time(pool, &1))}
     end
   end
@@ -542,12 +550,14 @@ defmodule Conn.Pool do
   end
 
   defp _call(%{closed: true} = info, {pool, resource, method, filter, _payload} = args) do
-    case select(pool, resource, method, filter) do
+    {:conn, id} = Process.get(:"$key")
+
+    case select(pool, resource, method, filter, except: [id]) do
       {:ok, id} ->
         key = {:conn, id}
         fun = &_call(&1, args)
         # Make chain call while not changing conn.
-        {{:chain, key, fun}, info}
+        {:chain, {key, fun}, info}
 
       err ->
         # Return an error while not changing conn.
@@ -663,11 +673,12 @@ defmodule Conn.Pool do
         end
       else
         # ttw > 50 ms.
-        with {:ok, id} <- select(pool, resource, method, filter),
+        with {:ok, id} <- select(pool, resource, method, filter, except: [id]),
              {:ok, potential_ttw} <- waiting_time(pool, id),
              true <- ttw > potential_ttw do
+          key = {:conn, id}
           fun = &_call(&1, args)
-          {:chain, {{:conn, id}, fun}, info}
+          {:chain, {key, fun}, info}
         else
           _ ->
             Process.sleep(20)
