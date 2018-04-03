@@ -9,7 +9,8 @@ defprotocol Conn do
     * `init/2` — initialize connection with given arguments;
     * `resource/1` — resource for that interaction is made;
     * `methods/1` — methods supported while making `Conn.call/3`;
-    * `call/3` — interact via selected method.
+    * `call/3` — interact via selected method;
+    * `timeout/1` — suggested timeout in ms before repeating `Conn.all/3`;
     * `parse/2` — parse data in respect of connection context.
 
   ## Example
@@ -36,7 +37,7 @@ defprotocol Conn do
           if Process.alive?(pid) do
             {:ok, %{conn | res: pid}}
           else
-            {:error, :dead, :infinity, conn} 
+            {:error, :dead, :infinity, conn}
           end
         end
 
@@ -253,6 +254,12 @@ defprotocol Conn do
       iex> Conn.call(conn, :get, & &1)
       {:error, :closed}
   """
+  # @spec call(Conn.t(), Conn.method(), any) ::
+  #         {:ok, Conn.t()}
+  #         | {:ok, reply, Conn.t()}
+  #         | {:error, :closed}
+  #         | {:error, :timeout | :notsupported | reason, Conn.t()}
+
   @spec call(Conn.t(), Conn.method(), any) ::
           {:ok, 0 | pos_integer | :infinity | :closed, Conn.t()}
           | {:ok, reply, 0 | pos_integer | :infinity | :closed, Conn.t()}
