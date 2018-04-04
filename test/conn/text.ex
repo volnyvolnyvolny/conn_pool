@@ -22,25 +22,27 @@ defimpl Conn, for: TextConn do
 
   def timeout(conn), do: conn.timeout
 
-  def call(%_{res: pid} = c, cmd, args \\ "") do
+  def call(%_{res: pid} = conn, cmd, args \\ "") do
     if Process.alive?(pid) do
+      conn = %{conn | timeout: 0}
+
       send(pid, {self(), (args && ":#{cmd}:#{args}") || ":#{cmd}"})
 
       receive do
         "ok" ->
-          {:ok, c}
+          {:ok, conn}
 
         "ok:" <> reply ->
-          {:ok, reply, c}
+          {:ok, reply, conn}
 
         "err:notsupported" ->
-          {:error, :notsupported, %{c | timeout: 50}}
+          {:error, :notsupported, %{conn | timeout: 50}}
 
         "err:" <> reason ->
-          {:error, reason, %{c | timeout: 50}}
+          {:error, reason, %{conn | timeout: 50}}
       after
         5000 ->
-          {:error, :timeout, c}
+          {:error, :timeout, conn}
       end
     else
       {:error, :closed}
