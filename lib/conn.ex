@@ -1,3 +1,40 @@
+defmodule Conn.Defaults do
+  @moduledoc """
+  Default implementations of optional callbacks of `Conn` protocol:
+  `Conn.undo/3`. All of them are overridable, and by default
+  return `{:error, :notsupported}`.
+
+  Use it like this:
+
+      defimpl Conn, for: MyConn do
+        use Conn.Defaults
+
+        # Callbacks:
+        def init(conn, init_args), do: …
+        def resource(conn), do: …
+        def methods(conn), do: …
+        def call(conn, method, payload), do: …
+
+        # Optional callbacks:
+        def timeout(conn), do: …
+        def parse(conn, data), do: …
+      end
+  """
+
+  defmacro __using__(_) do
+    quote do
+
+#      def undo(_conn,_method,_specs), do: {:error, :notimplemented}
+      def parse(_conn,_data), do: {:error, :notimplemented}
+      def timeout(_conn), do: 0
+
+      defoverridable [timeout: 1,
+#                      undo: 3,
+                      parse: 2]
+    end
+  end
+end
+
 defprotocol Conn do
   @moduledoc """
   High level abstraction that represents connection in the most common sense.
@@ -8,7 +45,7 @@ defprotocol Conn do
 
     * `init/2` — initialize connection with given arguments;
     * `resource/1` — resource for that interaction is made;
-    * `methods/1` — methods supported while making `Conn.call/3`;
+    * `methods!/1` — methods supported while making `Conn.call/3`;
     * `call/3` — interact via selected method;
     * `timeout/1` — suggested timeout in ms before repeating `Conn.all/3`;
     * `parse/2` — parse data in respect of connection context.
@@ -27,21 +64,22 @@ defprotocol Conn do
 
   Now simple test conn will look like:
 
-      defmodule TextConn, do: defstruct [:res]
+      defmodule TextConn, do: defstruct [:res, timeout: 0]
 
   Let's implement protocol described above:
 
       defimpl Conn, for: TextConn do
-
         def init(conn, pid) do
           if Process.alive?(pid) do
-            {:ok, %{conn | res: pid}}
+            {:ok, %TextConn{res: pid}}
           else
-            {:error, :dead, :infinity, conn}
+            {:error, :dead, %{conn | timeout: :closed}}
           end
         end
 
         def resource(%_{res: pid}), do: pid
+
+        def timeout(conn), do: conn.timeout
 
         def methods!(%_{res: pid}=conn) do
           send(pid, {self(), ":COMMANDS"})
@@ -49,9 +87,6 @@ defprotocol Conn do
           receive do
             "ok:" <> cmds ->
               String.split(",")
-
-            _ ->
-              :error
           end
         end
 
@@ -61,20 +96,19 @@ defprotocol Conn do
 
             receive do
               "ok" ->
-                {:ok, 0, c}
+                {:ok, c}
 
               "ok:" <> reply ->
-                {:ok, reply, 0, c}
+                {:ok, reply, c}
 
               "err:notsupported" ->
-                # Suggests timeout 50 ms.
-                {:error, :notsupported, 50, c}
+                {:error, :notsupported, %{c | timeout: 50}}
 
               "err:"<>reason ->
-                {:error, reason, 50, c}
+                {:error, reason, %{c | timeout: 50}}
             after
               5000 ->
-                {:error, :timeout, 0, c}
+                {:error, :timeout, c}
             end
           else
             {:error, :closed}
@@ -206,13 +240,10 @@ defprotocol Conn do
 
   ## Returns
 
-    * `{:ok, conn}` in case of successful initialization.
-
-    * `{:error, reason, 0 ms, conn}` in case initialization failed with reason
-    `reason`, suggested to repeat `init/2` call immediately.
-    * `{:error, reason, T ms, conn}` in case initialization failed with reason
-    `reason`, suggested to repeat `init/2` call after `T` milliseconds;
-    * `{:error, reason, :infinity, conn}` in case initialization failed with
+    * `{:ok, conn}` in case of successful initialization;
+    * `{:error, :timeout, conn}` in case initialization failed because it takes
+      too long;
+    * `{:error, reason, conn}` in case initialization failed with
     reason `reason`, suggested to never repeat `init/2` call.
 
   ## Examples
@@ -224,7 +255,7 @@ defprotocol Conn do
   """
   @spec init(Conn.t(), init_args) ::
           {:ok, Conn.t()}
-          | {:error, :timeout | reason, timeout, Conn.t()}
+          | {:error, :timeout | reason, Conn.t()}
   def init(_conn, args \\ nil)
 
   @doc """
@@ -232,41 +263,27 @@ defprotocol Conn do
 
   ## Returns
 
-    * `{:ok, timeout | :closed, conn}` if call succeed and *suggested* to wait
-      `timeout` ms until use `conn` again. `:closed` or `:infinity` means that
-      connection is closed and there can be no interactions from this moment as
-      any `call/3` will return `{:error, :closed}`;
-
-    * `{:ok, reply, timeout | :closed, conn}`, where `reply` is the response
-      data;
-
-    * `{:error, :closed}` if connection is closed;
-    * `{:error, reason, timeout | :closed, conn}`.
+    * `{:ok, conn}` if call succeed;
+    * `{:ok, reply, conn}`, where `reply` is the response data;
+    * `{:error, :closed}` if call fails because connection is closed;
+    * `{:error, reason, conn}` in case of arbitrary error.
 
   ## Examples
 
       iex> {:ok, conn} = Conn.init(%Conn.Agent{}, fn -> 42 end)
-      iex> {:ok, reply, 0, ^conn} = Conn.call(conn, :get, & &1)
+      iex> {:ok, reply, ^conn} = Conn.call(conn, :get, & &1)
       iex> reply
       42
-      iex> {:ok, :closed, conn} == Conn.call(conn, :stop)
+      iex> {:ok, conn} == Conn.call(conn, :stop)
       true
       iex> Conn.call(conn, :get, & &1)
       {:error, :closed}
   """
-  # @spec call(Conn.t(), Conn.method(), any) ::
-  #         {:ok, Conn.t()}
-  #         | {:ok, reply, Conn.t()}
-  #         | {:error, :closed}
-  #         | {:error, :timeout | :notsupported | reason, Conn.t()}
-
   @spec call(Conn.t(), Conn.method(), any) ::
-          {:ok, 0 | pos_integer | :infinity | :closed, Conn.t()}
-          | {:ok, reply, 0 | pos_integer | :infinity | :closed, Conn.t()}
+          {:ok, Conn.t()}
+          | {:ok, reply, Conn.t()}
           | {:error, :closed}
-          | {:error, :timeout, 0 | pos_integer | :infinity | :closed, Conn.t()}
-          | {:error, :notsupported, 0 | pos_integer | :infinity | :closed, Conn.t()}
-          | {:error, reason, 0 | pos_integer | :infinity | :closed, Conn.t()}
+          | {:error, :timeout | :notsupported | reason, Conn.t()}
   def call(conn, method, payload \\ nil)
 
   # @doc """
@@ -319,6 +336,18 @@ defprotocol Conn do
   """
   @spec resource(Conn.t()) :: resource | [resource]
   def resource(conn)
+
+
+  @doc """
+  *Suggested* value (in ms) to wait until use `call/3` again. Returns `0` if no
+  timeout is suggested; `:closed` or `:infinity` if connection should never be
+  used again as from this moment any `call/3` will return `{:error, :closed}`.
+
+  `Conn.Pool` executes this method after making every `call/3`.
+  """
+  @spec resource(Conn.t()) :: non_neg_integer() | :infinity | :closed
+  def timeout(conn)
+
 
   @doc """
   Methods of interactions available for connection. Can be http-methods: `:get`,

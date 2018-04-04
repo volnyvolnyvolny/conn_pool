@@ -1,11 +1,11 @@
-defmodule(TextConn, do: defstruct([:res]))
+defmodule(TextConn, do: defstruct([:res, timeout: 0]))
 
 defimpl Conn, for: TextConn do
   def init(conn, pid) do
     if Process.alive?(pid) do
-      {:ok, %{conn | res: pid}}
+      {:ok, %TextConn{res: pid}}
     else
-      {:error, :dead, :infinity, conn}
+      {:error, :dead, %{conn | timeout: :infinity}}
     end
   end
 
@@ -17,11 +17,10 @@ defimpl Conn, for: TextConn do
     receive do
       "ok:" <> cmds ->
         String.split(cmds, ",")
-
-      _ ->
-        :error
     end
   end
+
+  def timeout(conn), do: conn.timeout
 
   def call(%_{res: pid} = c, cmd, args \\ "") do
     if Process.alive?(pid) do
@@ -29,19 +28,19 @@ defimpl Conn, for: TextConn do
 
       receive do
         "ok" ->
-          {:ok, 0, c}
+          {:ok, c}
 
         "ok:" <> reply ->
-          {:ok, reply, 0, c}
+          {:ok, reply, c}
 
         "err:notsupported" ->
-          {:error, :notsupported, 50, c}
+          {:error, :notsupported, %{c | timeout: 50}}
 
         "err:" <> reason ->
-          {:error, reason, 50, c}
+          {:error, reason, %{c | timeout: 50}}
       after
         5000 ->
-          {:error, :timeout, 0, c}
+          {:error, :timeout, c}
       end
     else
       {:error, :closed}

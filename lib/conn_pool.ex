@@ -114,7 +114,10 @@ defmodule Conn.Pool do
   @type filter :: (Conn.info() -> as_boolean(term()))
 
   # Generate uniq id
-  defp gen_id, do: System.monotonic_time()
+  defp gen_id, do: now()
+
+  # Current monotonic time.
+  defp now(), do: System.monotonic_time()
 
   @doc """
   Starts pool as a linked process.
@@ -172,7 +175,7 @@ defmodule Conn.Pool do
 
   # Add conn to pool.
   defp add(pool, %{last_init: :never} = info) do
-    add(pool, %{info | last_init: System.monotonic_time()})
+    add(pool, %{info | last_init: now()})
   end
 
   defp add(pool, info) do
@@ -464,7 +467,7 @@ defmodule Conn.Pool do
           info
           | conn: conn,
             closed: false,
-            last_init: System.monotonic_time(),
+            last_init: now(),
             last_call: :never,
             timeout: 0
         }
@@ -546,7 +549,25 @@ defmodule Conn.Pool do
   defp expired?(%{ttl: :infinity}), do: false
 
   defp expired?(info) do
-    info.last_init + to_native(info.ttl) < System.monotonic_time()
+    info.last_init + to_native(info.ttl) < now()
+  end
+
+  defp handle_timeout(pool, info, status \\ :ok) do
+    {:conn, id} = Process.get(:"$key")
+
+    case Conn.timeout(info.conn) do
+      t when is_integer(t) ->
+        %{info | timeout: t}
+
+      _ ->
+        delete(pool, id)
+
+        if info.revive == :force || (status != :ok && info.revive) do
+          revive(pool, id, info)
+        end
+
+        %{info | closed: true}
+    end
   end
 
   defp _call(%{closed: true} = info, {pool, resource, method, filter, _payload} = args) do
@@ -573,7 +594,7 @@ defmodule Conn.Pool do
       if info.revive, do: revive(pool, id, info)
       _call(%{info | closed: true}, args)
     else
-      start = System.monotonic_time()
+      start = now()
       timeout = to_native(info.timeout)
 
       # Time to wait.
@@ -590,82 +611,38 @@ defmodule Conn.Pool do
         Process.sleep(if ttw < 0, do: 0, else: ttw)
 
         case Conn.call(info.conn, method, payload) do
-          {:ok, :closed, conn} ->
-            delete(pool, id)
-
+          {:ok, conn} ->
             info =
               info
               |> update_stats(method, start)
               |> Map.put(:conn, conn)
+              |> Map.put(:last_call, now())
 
-            if info.revive == :force do
-              revive(pool, id, info)
-            end
+            {:ok, handle_timeout(pool, info)}
 
-            {:ok, %{info | closed: true}}
-
-          {:ok, reply, :closed, conn} ->
-            delete(pool, id)
-
+          {:ok, reply, conn} ->
             info =
               info
               |> update_stats(method, start)
               |> Map.put(:conn, conn)
-              |> Map.put(:last_call, System.monotonic_time())
+              |> Map.put(:last_call, now())
 
-            if info.revive == :force do
-              revive(pool, id, info)
-            end
-
-            {{:ok, reply}, %{info | closed: true}}
-
-          {:ok, timeout, conn} ->
-            info =
-              info
-              |> update_stats(method, start)
-              |> Map.put(:conn, conn)
-              |> Map.put(:last_call, System.monotonic_time())
-              |> Map.put(:timeout, timeout)
-
-            {:ok, info}
-
-          {:ok, reply, timeout, conn} ->
-            info =
-              info
-              |> update_stats(method, start)
-              |> Map.put(:conn, conn)
-              |> Map.put(:last_call, System.monotonic_time())
-              |> Map.put(:timeout, timeout)
-
-            {{:ok, reply}, info}
+            {{:ok, reply}, handle_timeout(pool, info)}
 
           {:error, :closed} ->
             delete(pool, id)
 
-            if info.revive do
-              revive(pool, id, info)
-            end
+            if info.revive, do: revive(pool, id, info)
 
             _call(%{info | closed: true}, args)
 
-          {:error, reason, :closed, conn} ->
-            delete(pool, id)
-            info = %{info | conn: conn}
-
-            if info.revive do
-              revive(pool, id, info)
-            end
-
-            {{:error, reason}, %{info | closed: true}}
-
-          {:error, reason, timeout, conn} ->
+          {:error, reason, conn} ->
             info =
               info
               |> Map.put(:conn, conn)
-              |> Map.put(:timeout, timeout)
-              |> Map.put(:last_call, System.monotonic_time())
+              |> Map.put(:last_call, now())
 
-            {{:error, reason}, info}
+            {{:error, reason}, handle_timeout(pool, info, :error)}
 
           err ->
             Logger.warn("Conn.call returned unexpected: #{inspect(err)}.")
@@ -705,13 +682,13 @@ defmodule Conn.Pool do
     not provide given `method` of interaction;
     * `{:error, :filter}` if there is no conns satisfying `filter`;
 
-    * `{:error, :timeout}` if `Conn.call/3` returned `{:error, :timeout, _, _}`
+    * `{:error, :timeout}` if `Conn.call/3` returned `{:error, :timeout, _}`
       and there is no other connection capable to make this call;
     * and `{:error, reason}` in case of `Conn.call/3` returned arbitrary error.
 
-  In case of `Conn.call/3` returns `{:error, :timeout | reason, _, _}`,
-  `Conn.Pool` will use time penalties series, defined per pool (see
-  `start_link/2`) or per connection (see `%Conn{} :penalties` field).
+  In case of `Conn.call/3` returns `{:error, :timeout | reason, _}`, `Conn.Pool`
+  will use time penalties series, defined per pool (see `start_link/2`) or per
+  connection (see `%Conn{} :penalties` field).
 
     * `{:ok, reply} | :ok` in case of success.
   """

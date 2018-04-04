@@ -1,32 +1,26 @@
 defmodule(Conn.Agent, do: defstruct([:res]))
 
 defimpl Conn, for: Conn.Agent do
-  def init(conn, nil) do
-    if Process.alive?(conn.res) do
-      {:ok, conn}
-    else
-      {:error, :dead, :infinity, conn}
-    end
-  end
+  use Conn.Defaults
 
-  def init(conn, res: agent) do
-    if Process.alive?(agent) do
-      {:ok, %{conn | res: agent}}
+  def init(conn, res: pid) do
+    if Process.alive?(pid) do
+      {:ok, %Conn.Agent{res: pid}}
     else
-      {:error, :dead, :infinity, %{conn | res: agent}}
+      {:error, :dead, conn}
     end
   end
 
   def init(conn, fun) when is_function(fun, 0) do
     case Agent.start_link(fun) do
-      {:ok, agent} ->
-        init(conn, res: agent)
+      {:ok, pid} ->
+        init(conn, res: pid)
 
       :ignore ->
-        {:error, :ignore, :infinity, conn}
+        {:error, :ignore, conn}
 
       {:error, reason} ->
-        {:error, reason, :infinity, conn}
+        {:error, reason, conn}
     end
   end
 
@@ -36,18 +30,16 @@ defimpl Conn, for: Conn.Agent do
 
   def call(conn, method, fun \\ nil)
 
-  def call(%_{res: agent} = conn, method, fun) when method in [:get, :get_and_update, :update] do
-    if Process.alive?(agent) do
-      {:ok, apply(Agent, method, [agent, fun]), 0, conn}
+  def call(%_{res: pid} = conn, method, fun) when method in [:get, :get_and_update, :update] do
+    if Process.alive?(pid) do
+      {:ok, apply(Agent, method, [pid, fun]), conn}
     else
       {:error, :closed}
     end
   end
 
-  def call(%_{res: agent} = conn, :stop, nil) do
-    Agent.stop(agent)
-    {:ok, :closed, conn}
+  def call(%_{res: pid} = conn, :stop, nil) do
+    Agent.stop(pid)
+    {:ok, conn}
   end
-
-  def parse(_conn, _data), do: {:error, :notimplemented}
 end
