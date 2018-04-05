@@ -1,40 +1,3 @@
-defmodule Conn.Defaults do
-  @moduledoc """
-  Default implementations of optional callbacks of `Conn` protocol:
-  `Conn.undo/3`. All of them are overridable, and by default
-  return `{:error, :notsupported}`.
-
-  Use it like this:
-
-      defimpl Conn, for: MyConn do
-        use Conn.Defaults
-
-        # Callbacks:
-        def init(conn, init_args), do: …
-        def resource(conn), do: …
-        def methods(conn), do: …
-        def call(conn, method, payload), do: …
-
-        # Optional callbacks:
-        def timeout(conn), do: …
-        def parse(conn, data), do: …
-      end
-  """
-
-  defmacro __using__(_) do
-    quote do
-
-#      def undo(_conn,_method,_specs), do: {:error, :notimplemented}
-      def parse(_conn,_data), do: {:error, :notimplemented}
-      def timeout(_conn), do: 0
-
-      defoverridable [timeout: 1,
-#                      undo: 3,
-                      parse: 2]
-    end
-  end
-end
-
 defprotocol Conn do
   @moduledoc """
   High level abstraction that represents connection in the most common sense.
@@ -47,7 +10,6 @@ defprotocol Conn do
     * `resource/1` — resource for that interaction is made;
     * `methods!/1` — methods supported while making `Conn.call/3`;
     * `call/3` — interact via selected method;
-    * `timeout/1` — suggested timeout in ms before repeating `Conn.all/3`;
     * `parse/2` — parse data in respect of connection context.
 
   ## Example
@@ -73,13 +35,11 @@ defprotocol Conn do
           if Process.alive?(pid) do
             {:ok, %TextConn{res: pid}}
           else
-            {:error, :dead, %{conn | timeout: :closed}}
+            {:error, :dead, :closed, conn}
           end
         end
 
         def resource(%_{res: pid}), do: pid
-
-        def timeout(conn), do: conn.timeout
 
         def methods!(%_{res: pid}=conn) do
           send(pid, {self(), ":COMMANDS"})
@@ -98,16 +58,16 @@ defprotocol Conn do
 
             receive do
               "ok" ->
-                {:ok, conn}
+                {:noreply, conn}
 
               "ok:" <> reply ->
-                {:ok, reply, conn}
+                {:reply, reply, conn}
 
               "err:notsupported" ->
-                {:error, :notsupported, %{conn | timeout: 50}}
+                {:error, :notsupported, 50, conn}
 
               "err:"<>reason ->
-                {:error, reason, %{conn | timeout: 50}}
+                {:error, reason, 50, conn}
             after
               5000 ->
                 {:error, :timeout, conn}
@@ -240,13 +200,18 @@ defprotocol Conn do
   @doc """
   Initialize connection, args could be provided.
 
-  ## Returns
+  ## In case of succeed, returns
 
-    * `{:ok, conn}` in case of successful initialization;
-    * `{:error, :timeout, conn}` in case initialization failed because it takes
-      too long;
-    * `{:error, reason, conn}` in case initialization failed with
-    reason `reason`, suggested to never repeat `init/2` call.
+    * `{:ok, conn}` — conn could be used immediately;
+    * `{:ok, timeout, conn}` — wait `timeout` ms before use.
+
+  ## If initialization fails, returns
+
+    * `{:error, :timeout, conn}` when init takes too long, and is suggested to
+      repeat it immediately;
+    * `{:error, reason, conn}` — suggested to repeat call immediately;
+    * `{:error, reason, timeout, conn}` — suggested to repeat call after
+      `timeout` ms.
 
   ## Examples
 
@@ -257,33 +222,46 @@ defprotocol Conn do
   """
   @spec init(Conn.t(), init_args) ::
           {:ok, Conn.t()}
+          | {:ok, timeout, Conn.t()}
           | {:error, :timeout | reason, Conn.t()}
+          | {:error, :timeout | reason, timeout, Conn.t()}
   def init(_conn, args \\ nil)
 
   @doc """
   Interact using given connection, method and data.
 
-  ## Returns
+  ## If call succeed, returns
 
-    * `{:ok, conn}` if call succeed;
-    * `{:ok, reply, conn}`, where `reply` is the response data;
-    * `{:error, :closed}` if call fails because connection is closed;
-    * `{:error, reason, conn}` in case of arbitrary error.
+    * `{:noreply, conn}` — call could be repeated immediately;
+    * `{:noreply, timeout, conn}` — call could be repeated after `timeout` ms;
+
+    * `{:reply, reply, conn}`, where `reply` is the response data, call could be
+      repeated immediately;
+    * `{:reply, reply, timeout, conn}` suggested to repeat call no sooner than
+      `timeout` ms.
+
+  ## If call fails, returns
+
+    * `{:error, :closed}` — because connection is closed (use `init/2` to
+      reopen);
+    * `{:error, reason, conn}` with an arbitrary `reason`, call could be
+      repeated immediately;
+    * `{:error, reason, timeout, conn}` suggested to repeat call no sooner than
+      `timeout` ms.
 
   ## Examples
 
-      iex> {:ok, conn} = Conn.init(%Conn.Agent{}, fn -> 42 end)
-      iex> {:ok, reply, ^conn} = Conn.call(conn, :get, & &1)
-      iex> reply
-      42
-      iex> {:ok, conn} == Conn.call(conn, :stop)
-      true
+      iex> {:noreply, conn} = Conn.init(%Conn.Agent{}, fn -> 42 end)
+      iex> {:reply, 42, ^conn} = Conn.call(conn, :get, & &1)
+      iex> {:noreply, ^conn} = Conn.call(conn, :stop)
       iex> Conn.call(conn, :get, & &1)
       {:error, :closed}
   """
   @spec call(Conn.t(), Conn.method(), any) ::
-          {:ok, Conn.t()}
-          | {:ok, reply, Conn.t()}
+          {:noreply, Conn.t()}
+          | {:noreply, timeout, Conn.t()}
+          | {:reply, reply, Conn.t()}
+          | {:reply, reply, timeout, Conn.t()}
           | {:error, :closed}
           | {:error, :timeout | :notsupported | reason, Conn.t()}
   def call(conn, method, payload \\ nil)
@@ -338,18 +316,6 @@ defprotocol Conn do
   """
   @spec resource(Conn.t()) :: resource | [resource]
   def resource(conn)
-
-
-  @doc """
-  *Suggested* value (in ms) to wait until use `call/3` again. Returns `0` if no
-  timeout is suggested; `:closed` or `:infinity` if connection should never be
-  used again as from this moment any `call/3` will return `{:error, :closed}`.
-
-  `Conn.Pool` executes this method after making every `call/3`.
-  """
-  @spec resource(Conn.t()) :: non_neg_integer() | :infinity | :closed
-  def timeout(conn)
-
 
   @doc """
   Methods of interactions available for connection. Can be http-methods: `:get`,

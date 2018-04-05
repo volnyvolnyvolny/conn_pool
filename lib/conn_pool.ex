@@ -552,6 +552,9 @@ defmodule Conn.Pool do
     info.last_init + to_native(info.ttl) < now()
   end
 
+  defp handle_call() do
+  end
+  
   defp handle_timeout(pool, info, status \\ :ok) do
     {:conn, id} = Process.get(:"$key")
 
