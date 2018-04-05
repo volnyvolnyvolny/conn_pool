@@ -1,18 +1,18 @@
-defmodule(TextConn, do: defstruct([:res, timeout: 0]))
+defmodule(TextConn, do: defstruct([:res]))
 
 defimpl Conn, for: TextConn do
-  def init(conn, pid) do
-    if Process.alive?(pid) do
-      {:ok, %TextConn{res: pid}}
+  def init(conn, server) do
+    if Process.alive?(server) do
+      {:ok, %TextConn{res: server}}
     else
       {:error, :dead, %{conn | timeout: :infinity}}
     end
   end
 
-  def resource(%_{res: pid}), do: pid
+  def resource(%_{res: server}), do: server
 
-  def methods!(%_{res: pid}) do
-    send(pid, {self(), ":COMMANDS"})
+  def methods!(%_{res: server}) do
+    send(server, {self(), ":COMMANDS"})
 
     receive do
       "ok:" <> cmds ->
@@ -20,26 +20,22 @@ defimpl Conn, for: TextConn do
     end
   end
 
-  def timeout(conn), do: conn.timeout
-
-  def call(%_{res: pid} = conn, cmd, args \\ "") do
-    if Process.alive?(pid) do
-      conn = %{conn | timeout: 0}
-
-      send(pid, {self(), (args && ":#{cmd}:#{args}") || ":#{cmd}"})
+  def call(%_{res: server} = conn, cmd, args \\ "") do
+    if Process.alive?(server) do
+      send(server, {self(), (args && ":#{cmd}:#{args}") || ":#{cmd}"})
 
       receive do
         "ok" ->
-          {:ok, conn}
+          {:noreply, conn}
 
         "ok:" <> reply ->
-          {:ok, reply, conn}
+          {:reply, reply, conn}
 
         "err:notsupported" ->
-          {:error, :notsupported, %{conn | timeout: 50}}
+          {:error, :notsupported, conn}
 
         "err:" <> reason ->
-          {:error, reason, %{conn | timeout: 50}}
+          {:error, reason, 50, conn}
       after
         5000 ->
           {:error, :timeout, conn}

@@ -16,25 +16,24 @@ defmodule Conn.Pool do
   In the following examples, `%Conn.Agent{}` represents connection to some
   `Agent` that can be created separately or via `Conn.init/2`. Available methods
   of interaction with `Agent` are `:get`, `:get_and_update`, `:update` and
-  `:stop` (see `Conn.methods!/1`). This type of connection means to exist only as
-  an example for doctests. More meaningful example would be `Conn.Plug` wrapper.
-  Also, see `Conn` docs for detailed example on `Conn` protocol implementation
-  and use.
+  `:stop` (see `Conn.methods!/1`). This type of connection means to exist only
+  as an example for doctests. More meaningful example would be `Conn.Plug`
+  wrapper. Also, see `Conn` docs for detailed example on `Conn` protocol
+  implementation and use.
 
       iex> {:ok, pool} = Conn.Pool.start_link()
       iex> {:ok, agent} = Agent.start_link(fn -> 42 end)
       iex> {:ok, id} = Conn.Pool.init(pool, %Conn.Agent{}, res: agent)
       iex> Conn.Pool.extra(pool, id, type: :agent) # add `extra` info
       {:ok, nil}
+      #
       # Pool wraps conn into `%Conn{}` struct.
       iex> {:ok, info} = Conn.Pool.info(pool, id)
       iex> info.extra
       [type: :agent]
       iex> info.methods
       [:get, :get_and_update, :update, :stop]
-      iex> agent == Conn.resource(info.conn)
-      true
-      #
+      iex> ^agent = Conn.resource(info.conn)
       iex> Conn.Pool.call(pool, agent, :get, & &1)
       {:ok, 42}
       iex> Conn.Pool.call(pool, agent, :get, & &1.extra[:type] != :agent, & &1)
@@ -66,8 +65,8 @@ defmodule Conn.Pool do
       # but:
       iex> {:error, :dead, :infinity, conn} == Conn.init(conn)
       true
-      # `Conn.init/2` suggests to never reinitialize again (`:infinity` timeout)
-      # so pool will just drop this conn.
+      # `Conn.init/2` suggests to never reinitialize again
+      # (`:infinity` timeout) so pool will just drop this conn.
       iex> Conn.Pool.resources(pool)
       []
 
@@ -113,7 +112,7 @@ defmodule Conn.Pool do
   @type reason :: any
   @type filter :: (Conn.info() -> as_boolean(term()))
 
-  # Generate uniq id
+  # Generate uniq id.
   defp gen_id, do: now()
 
   # Current monotonic time.
@@ -142,9 +141,8 @@ defmodule Conn.Pool do
 
     * `{:ok, id}` in case of `Conn.init/2` returns `{:ok, conn}`, where `id` is
       the identifier that can be used to refer `conn`;
-    * `{:error, :timeout}` if `Conn.init/2` returns `{:ok, :timeout}` or
-      initialization spended more than `%Conn{}.init_timeout` ms.
-    * `{:error, reason}` in case `Conn.init/2` returns arbitrary error.
+    * `{:error, :timeout}` if `Conn.init/2` returns `{:ok, :timeout}`;
+    * `{:error, reason}` in case `Conn.init/2` returns an arbitrary error.
   """
   @spec init(Conn.Pool.t(), Conn.t() | Conn.info(), any) ::
           {:ok, id} | {:error, :timeout | reason}
@@ -205,7 +203,7 @@ defmodule Conn.Pool do
 
         ret ->
           raise("""
-            Conn.methods/1 call expected to return [method]
+            Conn.methods!/1 call expected to return [method]
             or {[method], updated conn}, but instead #{inspect(ret)} returned.
           """)
       end
@@ -213,11 +211,8 @@ defmodule Conn.Pool do
   end
 
   @doc """
-  Adds given `%Conn{}` to pool, returning id to refer `info.conn` in future.
-
-  Put will refresh data in `%Conn{}.methods` with `Conn.methods/1`.
-
-  Returns `{:ok, id}`.
+  Adds given `%Conn{}` to pool, returning id to refer it later.
+  This call always refresh data cached in `%Conn{}.methods`.
 
   ## Example
 
@@ -312,7 +307,7 @@ defmodule Conn.Pool do
   end
 
   @doc """
-  Pop conns to `resource` that satisfy `filter`.
+  Pops conns to `resource` that satisfy `filter`.
   """
   @spec pop(Conn.Pool.t(), Conn.resource(), filter) :: [Conn.info()]
   def pop(pool, resource, filter) when is_function(filter, 1) do
@@ -325,8 +320,7 @@ defmodule Conn.Pool do
   end
 
   @doc """
-  Apply given `fun` to every conn to `resource`.
-  Returns list of results.
+  Applies given `fun` to every `resource` conn.
   """
   @spec map(Conn.Pool.t(), Conn.resource(), (Conn.info() -> a)) :: [a] when a: var
   def map(pool, resource, fun) when is_function(fun, 1) do
@@ -360,8 +354,8 @@ defmodule Conn.Pool do
   end
 
   @doc """
-  Update every conn to `resource`, satisfying given `filter` with `fun`. This
-  function always returns `:ok`.
+  Updates connections to `resource` that satisfy given `filter`. This function
+  always returns `:ok`.
 
   ## Example
 
@@ -552,25 +546,20 @@ defmodule Conn.Pool do
     info.last_init + to_native(info.ttl) < now()
   end
 
-  defp handle_call() do
+  defp merge(info, conn, t \\ 0) do
+    %{info | conn: conn, last_call: now(), timeout: t}
   end
-  
-  defp handle_timeout(pool, info, status \\ :ok) do
+
+  defp close(info, pool, status \\ :ok) do
     {:conn, id} = Process.get(:"$key")
 
-    case Conn.timeout(info.conn) do
-      t when is_integer(t) ->
-        %{info | timeout: t}
+    delete(pool, id)
 
-      _ ->
-        delete(pool, id)
-
-        if info.revive == :force || (status != :ok && info.revive) do
-          revive(pool, id, info)
-        end
-
-        %{info | closed: true}
+    if info.revive == :force || (status != :ok && info.revive) do
+      revive(pool, id, info)
     end
+
+    %{info | closed: true, timeout: :infinity}
   end
 
   defp _call(%{closed: true} = info, {pool, resource, method, filter, _payload} = args) do
@@ -603,49 +592,60 @@ defmodule Conn.Pool do
       # Time to wait.
       last_call = info.last_call
 
-      ttw =
-        if last_call == :never do
-          0
-        else
-          last_call + timeout - start
-        end
+      ttw = (last_call == :never && 0) || last_call + timeout - start
 
       if to_ms(ttw) < 50 do
         Process.sleep(if ttw < 0, do: 0, else: ttw)
 
         case Conn.call(info.conn, method, payload) do
-          {:ok, conn} ->
-            info =
-              info
-              |> update_stats(method, start)
-              |> Map.put(:conn, conn)
-              |> Map.put(:last_call, now())
+          {:noreply, conn} ->
+            {:ok, merge(info, conn) |> update_stats(method, start)}
 
-            {:ok, handle_timeout(pool, info)}
+          {:noreply, t, conn} when t in [:infinity, :closed] ->
+            {:ok,
+             info
+             |> merge(conn, :infinity)
+             |> update_stats(method, start)
+             |> close(pool)}
 
-          {:ok, reply, conn} ->
-            info =
-              info
-              |> update_stats(method, start)
-              |> Map.put(:conn, conn)
-              |> Map.put(:last_call, now())
+          {:noreply, timeout, conn} ->
+            {:ok,
+             info
+             |> merge(conn, timeout)
+             |> update_stats(method, start)}
 
-            {{:ok, reply}, handle_timeout(pool, info)}
+          {:reply, r, conn} ->
+            {{:ok, r}, merge(info, conn) |> update_stats(method, start)}
+
+          {:reply, r, t, conn} when t in [:infinity, :closed] ->
+            {{:ok, r},
+             info
+             |> merge(conn, :infinity)
+             |> update_stats(method, start)
+             |> close(pool)}
+
+          {:reply, r, timeout, conn} ->
+            {{:ok, r},
+             info
+             |> merge(conn, timeout)
+             |> update_stats(method, start)}
 
           {:error, :closed} ->
             delete(pool, id)
-
             if info.revive, do: revive(pool, id, info)
-
             _call(%{info | closed: true}, args)
 
           {:error, reason, conn} ->
-            info =
-              info
-              |> Map.put(:conn, conn)
-              |> Map.put(:last_call, now())
+            {{:error, reason}, merge(info, conn)}
 
-            {{:error, reason}, handle_timeout(pool, info, :error)}
+          {:error, reason, t, conn} when t in [:infinity, :closed] ->
+            {{:error, reason},
+             info
+             |> merge(conn, :infinity)
+             |> close(pool, :error)}
+
+          {:error, reason, timeout, conn} ->
+            {{:error, reason}, merge(info, conn, timeout)}
 
           err ->
             Logger.warn("Conn.call returned unexpected: #{inspect(err)}.")

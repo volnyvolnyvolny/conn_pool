@@ -17,32 +17,31 @@ defprotocol Conn do
   Let's implement simple generic text-base RPC protocol. Client can send server
   requests in the form of `:COMMAND` or `:COMMAND:ARGS` to execute `COMMAND`
   with given `ARGS` or without them. There is a special request `:COMMANDS` to
-  ask for a list of all available commands, that is send in form of
-  `ok:COMMAND1, CMD2,…`.
+  ask for a list of all available commands, response for it is `ok:COMMAND1,CMD2,…`.
 
   Server may reply with `ok:COMMAND1,CMD2,…`, `ok`, `ok:DATA` or `err:REASON`,
-  where `REASON` could be `notsupported` (command), `badarg`, `parse`, or any
-  other.
+  where `REASON` could be `notsupported` (command), `badarg`, `parse`, or
+  arbitrary string.
 
   Now simple test conn will look like:
 
-      defmodule TextConn, do: defstruct [:res, timeout: 0]
+      defmodule TextConn, do: defstruct [:res]
 
   Let's implement protocol described above:
 
       defimpl Conn, for: TextConn do
-        def init(conn, pid) do
-          if Process.alive?(pid) do
-            {:ok, %TextConn{res: pid}}
+        def init(conn, server) do
+          if Process.alive?(server) do
+            {:ok, %TextConn{res: server}}
           else
             {:error, :dead, :closed, conn}
           end
         end
 
-        def resource(%_{res: pid}), do: pid
+        def resource(%_{res: server}), do: server
 
-        def methods!(%_{res: pid}=conn) do
-          send(pid, {self(), ":COMMANDS"})
+        def methods!(%_{res: server}=conn) do
+          send(server, {self(), ":COMMANDS"})
 
           receive do
             "ok:" <> cmds ->
@@ -50,11 +49,9 @@ defprotocol Conn do
           end
         end
 
-        def call(%_{res: pid} = conn, cmd, args \\\\ nil) when is_binary(args) do
-          if Process.alive?(pid) do
-            conn = %{conn | timeout: 0}
-
-            send(pid, {self(), args && ":\#{cmd}:\#{args}" || ":\#{cmd}"})
+        def call(%_{res: server} = conn, cmd, args \\\\ nil) when is_binary(args) do
+          if Process.alive?(server) do
+            send(server, {self(), args && ":\#{cmd}:\#{args}" || ":\#{cmd}"})
 
             receive do
               "ok" ->
@@ -64,9 +61,10 @@ defprotocol Conn do
                 {:reply, reply, conn}
 
               "err:notsupported" ->
-                {:error, :notsupported, 50, conn}
+                {:error, :notsupported, conn}
 
               "err:"<>reason ->
+                # Suggest 50 ms timeout.
                 {:error, reason, 50, conn}
             after
               5000 ->
@@ -77,7 +75,7 @@ defprotocol Conn do
           end
         end
 
-  — it's the part of the implementation used on the client side, and now
+  — it's the part of the implementation used on the client side. Let's move to
   parsing:
 
         def parse(conn, ""), do: :ok
@@ -88,10 +86,11 @@ defprotocol Conn do
             %{"cmd" => cmd, "args" => args} ->
               {:ok, {:call, cmd, args}, ""}
 
-            nil ->
+            _ ->
               {:error, {:parse, data}, ""}
           end
         end
+
         def parse(conn, malformed) do
           {:error, {:parse, malformed}, ""}
         end
@@ -104,33 +103,33 @@ defprotocol Conn do
       iex> defmodule Server do
       ...>   def loop(state \\\\ 0) do
       ...>     receive do
-      ...>       {pid, data} ->
+      ...>       {client, data} ->
       ...>         case Conn.parse(%TextConn{}, data) do
       ...>           {:error, {:parse, _}, _rest} ->
-      ...>              send(pid, "err:parse")
+      ...>              send(client, "err:parse")
       ...>              loop(state)
       ...>
       ...>           {:ok, :methods, _rest} ->
-      ...>              send(pid, "ok:INC,GET,STOP")
+      ...>              send(client, "ok:INC,GET,STOP")
       ...>              loop(state)
       ...>
       ...>           {:ok, {:call, "INC", ""}, _rest} ->
-      ...>              send(pid, "ok:\#{state+1}")
+      ...>              send(client, "ok:\#{state+1}")
       ...>              loop(state+1)
       ...>
       ...>           {:ok, {:call, "GET", ""}, _rest} ->
-      ...>              send(pid, "ok:\#{state}")
+      ...>              send(client, "ok:\#{state}")
       ...>              loop(state)
       ...>
       ...>           {:ok, {:call, "STOP", ""}, _rest} ->
-      ...>              send(pid, "ok")
+      ...>              send(client, "ok")
       ...>
       ...>           {:ok, {:call, _, ""}, _rest} ->
-      ...>              send(pid, "err:notsupported")
+      ...>              send(client, "err:notsupported")
       ...>              loop(state)
       ...>
       ...>           {:ok, {:call, _, _}, _rest} ->
-      ...>              send(pid, "err:badarg")
+      ...>              send(client, "err:badarg")
       ...>              loop(state)
       ...>         end
       ...>     end
@@ -154,7 +153,7 @@ defprotocol Conn do
       iex> Conn.Pool.call(pool, res, "GET")
       {:error, :closed}
 
-  `TextConn` could be used to connect to *any* server that implements above
+  `TextConn` could be used to connect to any server that implements above
   protocol.
   """
 
@@ -202,16 +201,17 @@ defprotocol Conn do
 
   ## In case of succeed, returns
 
-    * `{:ok, conn}` — conn could be used immediately;
-    * `{:ok, timeout, conn}` — wait `timeout` ms before use.
+    * `{:ok, conn}`, where `conn` could be used immediately;
+    * `{:ok, timeout, conn}`, where suggested to wait `timeout` ms before use
+      `conn`.
 
   ## If initialization fails, returns
 
-    * `{:error, :timeout, conn}` when init takes too long, and is suggested to
+    * `{:error, :timeout, conn}` when call took too long, and it is suggested to
       repeat it immediately;
-    * `{:error, reason, conn}` — suggested to repeat call immediately;
-    * `{:error, reason, timeout, conn}` — suggested to repeat call after
-      `timeout` ms.
+    * `{:error, reason, conn}` when suggested to repeat call immediately;
+    * `{:error, reason, timeout, conn}` when suggested to repeat `init/2` call
+      after `timeout` ms.
 
   ## Examples
 
@@ -228,30 +228,36 @@ defprotocol Conn do
   def init(_conn, args \\ nil)
 
   @doc """
-  Interact using given connection, method and data.
+  Interacts using given connection, method and data.
 
   ## If call succeed, returns
 
     * `{:noreply, conn}` — call could be repeated immediately;
     * `{:noreply, timeout, conn}` — call could be repeated after `timeout` ms;
+    * `{:noreply, :infinity | :closed, conn}` — call should not be repeated as
+      it will return `{:error, :closed}` until reopen happend (via `init/2`);
 
-    * `{:reply, reply, conn}`, where `reply` is the response data, call could be
-      repeated immediately;
-    * `{:reply, reply, timeout, conn}` suggested to repeat call no sooner than
-      `timeout` ms.
+    * `{:reply, reply, conn}`, where `reply` is the response data and call could
+      be repeated immediately;
+    * `{:reply, reply, timeout, conn}` when suggested to repeat call no sooner
+      than `timeout` ms;
+    * `{:reply, reply, :infinity | :closed, conn}` when `init/2` should be
+      called prior to any other interactions.
 
   ## If call fails, returns
 
     * `{:error, :closed}` — because connection is closed (use `init/2` to
       reopen);
-    * `{:error, reason, conn}` with an arbitrary `reason`, call could be
-      repeated immediately;
+    * `{:error, reason, conn}` where `reason` is an arbitrary term and call
+      could be repeated immediately;
     * `{:error, reason, timeout, conn}` suggested to repeat call no sooner than
-      `timeout` ms.
+      `timeout` ms;
+    * `{:error, reason, :infinity | :closed, conn}` when call should be repeated
+      only after connection is reopened with `init/2`.
 
   ## Examples
 
-      iex> {:noreply, conn} = Conn.init(%Conn.Agent{}, fn -> 42 end)
+      iex> {:ok, conn} = Conn.init(%Conn.Agent{}, fn -> 42 end)
       iex> {:reply, 42, ^conn} = Conn.call(conn, :get, & &1)
       iex> {:noreply, ^conn} = Conn.call(conn, :stop)
       iex> Conn.call(conn, :get, & &1)
@@ -264,6 +270,7 @@ defprotocol Conn do
           | {:reply, reply, timeout, Conn.t()}
           | {:error, :closed}
           | {:error, :timeout | :notsupported | reason, Conn.t()}
+          | {:error, :timeout | :notsupported | reason, timeout | :closed, Conn.t()}
   def call(conn, method, payload \\ nil)
 
   # @doc """
@@ -298,7 +305,7 @@ defprotocol Conn do
   # def undo(conn, method, payload_used \\ [])
 
   @doc """
-  Resource is an arbitrary term. Mostly it is some pid. Connection represents
+  Resource is an arbitrary term (for ex., some pid). Connection represents
   interaction with resource.
 
   ## Examples

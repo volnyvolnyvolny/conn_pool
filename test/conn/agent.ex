@@ -1,13 +1,11 @@
 defmodule(Conn.Agent, do: defstruct([:res]))
 
 defimpl Conn, for: Conn.Agent do
-  use Conn.Defaults
-
   def init(conn, res: pid) do
     if Process.alive?(pid) do
       {:ok, %Conn.Agent{res: pid}}
     else
-      {:error, :dead, conn}
+      {:error, :dead, :infinity, conn}
     end
   end
 
@@ -20,11 +18,15 @@ defimpl Conn, for: Conn.Agent do
         {:error, :ignore, conn}
 
       {:error, reason} ->
-        {:error, reason, conn}
+        # Suggested to repeat initialization after
+        # 50 ms timeout.
+        {:error, reason, 50, conn}
     end
   end
 
   def resource(%_{res: agent}), do: agent
+
+  def parse(_conn, _data), do: {:error, :notimplemented}
 
   def methods!(_conn), do: [:get, :get_and_update, :update, :stop]
 
@@ -32,7 +34,7 @@ defimpl Conn, for: Conn.Agent do
 
   def call(%_{res: pid} = conn, method, fun) when method in [:get, :get_and_update, :update] do
     if Process.alive?(pid) do
-      {:ok, apply(Agent, method, [pid, fun]), conn}
+      {:reply, apply(Agent, method, [pid, fun]), conn}
     else
       {:error, :closed}
     end
@@ -40,6 +42,6 @@ defimpl Conn, for: Conn.Agent do
 
   def call(%_{res: pid} = conn, :stop, nil) do
     Agent.stop(pid)
-    {:ok, conn}
+    {:noreply, conn}
   end
 end
