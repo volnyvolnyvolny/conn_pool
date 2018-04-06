@@ -36,6 +36,8 @@ defmodule Conn.Pool do
       iex> ^agent = Conn.resource(info.conn)
       iex> Conn.Pool.call(pool, agent, :get, & &1)
       {:ok, 42}
+      #
+      # Now we use filter (& &1.extra[:type] != :agent).
       iex> Conn.Pool.call(pool, agent, :get, & &1.extra[:type] != :agent, & &1)
       {:error, :filter}
       #
