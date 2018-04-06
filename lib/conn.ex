@@ -82,7 +82,7 @@ defprotocol Conn do
         def parse(conn, ":COMMANDS" <> _), do: {:ok, :methods, ""}
 
         def parse(conn, ":" <> data) do
-          case Regex.named_captures(~r[(?<cmd>.*)(:(?<args>.*))?], data) do
+          case Regex.named_captures(~r[(?<cmd>[^:]+)(?::(?<args>.*))?], data) do
             %{"cmd" => cmd, "args" => args} ->
               {:ok, {:call, cmd, args}, ""}
 
@@ -151,7 +151,7 @@ defprotocol Conn do
       iex> Conn.Pool.call(pool, res, "STOP")
       :ok
       iex> Conn.Pool.call(pool, res, "GET")
-      {:error, :closed}
+      {:error, :resource}
 
   `TextConn` could be used to connect to any server that implements above
   protocol.
@@ -259,7 +259,7 @@ defprotocol Conn do
 
       iex> {:ok, conn} = Conn.init(%Conn.Agent{}, fn -> 42 end)
       iex> {:reply, 42, ^conn} = Conn.call(conn, :get, & &1)
-      iex> {:noreply, ^conn} = Conn.call(conn, :stop)
+      iex> {:noreply, :closed, ^conn} = Conn.call(conn, :stop)
       iex> Conn.call(conn, :get, & &1)
       {:error, :closed}
   """

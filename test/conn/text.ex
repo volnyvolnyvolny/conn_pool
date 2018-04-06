@@ -49,7 +49,7 @@ defimpl Conn, for: TextConn do
   def parse(_conn, ":COMMANDS" <> _), do: {:ok, :methods, ""}
 
   def parse(_conn, ":" <> data) do
-    case Regex.named_captures(~r[(?<cmd>.*)(:(?<args>.*))?], data) do
+    case Regex.named_captures(~r/(?<cmd>[^:]+)(?::(?<args>.*))?/, data) do
       %{"cmd" => cmd, "args" => args} ->
         {:ok, {:call, cmd, args}, ""}
 

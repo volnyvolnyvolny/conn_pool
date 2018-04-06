@@ -621,7 +621,9 @@ defmodule Conn.Pool do
       ttw = (last_call == :never && 0) || last_call + timeout - start
 
       if to_ms(ttw) < 50 do
-        Process.sleep(if ttw < 0, do: 0, else: ttw)
+        if ttw > 0 do
+          Process.sleep(to_ms(ttw))
+        end
 
         case Conn.call(info.conn, method, payload) do
           {:noreply, conn} ->
