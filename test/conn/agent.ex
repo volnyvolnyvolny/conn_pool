@@ -1,6 +1,14 @@
 defmodule(Conn.Agent, do: defstruct([:res]))
 
 defimpl Conn, for: Conn.Agent do
+  def init(conn, nil) do
+    if Process.alive?(conn.res) do
+      {:ok, %Conn.Agent{res: conn.res}}
+    else
+      {:error, :dead, :infinity, conn}
+    end
+  end
+
   def init(conn, res: pid) do
     if Process.alive?(pid) do
       {:ok, %Conn.Agent{res: pid}}
@@ -42,6 +50,6 @@ defimpl Conn, for: Conn.Agent do
 
   def call(%_{res: pid} = conn, :stop, nil) do
     Agent.stop(pid)
-    {:noreply, conn}
+    {:noreply, :closed, conn}
   end
 end

@@ -61,7 +61,10 @@ defmodule Conn.Pool do
       # There are conns for resource `agent` in this pool.
       iex> Conn.Pool.call(pool, agent, :stop)
       :ok
-      iex> not Process.alive?(agent) && Conn.Pool.empty?(pool, agent)
+      iex> not Process.alive?(agent)
+      true
+      iex> :timer.sleep(10)
+      iex> Conn.Pool.empty?(pool, agent)
       true
       # Now conn is `:closed` and will be reinitialized by pool,
       # but:
