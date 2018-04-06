@@ -244,29 +244,61 @@ defmodule Conn.Pool do
     add(pool, add_methods!(info))
   end
 
-  defp delete(pool, id), do: pop(pool, id)
+  defp delete(pool, id) do
+    case info(pool, id) do
+      {:ok, info} ->
+        AgentMap.delete(pool, {:conn, id})
+
+        AgentMap.cast(
+          pool,
+          fn
+            [[^id]] ->
+              :drop
+
+            [ids] ->
+              [List.delete(ids, id)]
+
+            [nil] ->
+              :id
+          end,
+          [{:res, Conn.resource(info.conn)}]
+        )
+
+      :error ->
+        :ignore
+    end
+  end
 
   @doc """
-  Works as `info/2`, but also deletes connection.
+  Deletes connection and returns corresponding `%Conn{}` struct.
 
-  Connection wrapper is returned only after all calls in the corresponding queue
-  are fulfilled.
+  Returns only after all calls awaiting execution on this conn are made.
 
   ## Returns
 
     * `{:ok, Conn struct}` in case conn with such id exists;
     * `:error` — otherwise.
 
-  ## Example
+  ## Examples
 
       iex> {:ok, pool} = Conn.Pool.start_link()
       iex> {:ok, agent} = Agent.start_link(fn -> 42 end)
       iex> {:ok, id} = Conn.Pool.init(pool, %Conn.Agent{}, res: agent)
+      iex> Conn.Pool.call(pool, agent, :get, & &1)
+      {:ok, 42}
       iex> {:ok, %Conn{conn: conn}} = Conn.Pool.pop(pool, id)
-      iex> Agent.get(Conn.resource(conn), & &1)
-      42
       iex> Conn.Pool.pop(pool, id)
       :error
+      iex> Conn.Pool.call(pool, agent, :get, & &1)
+      {:error, :resource}
+      # But, still:
+      iex> Agent.get(Conn.resource(conn), & &1)
+      42
+
+  Also, you can pop only those connections that satisfy the specified filter.
+
+      iex> {:ok, pool} = Conn.Pool.start_link()
+      iex> {:ok, agent} = Agent.start_link(fn -> 42 end)
       iex> {:ok, id1} = Conn.Pool.init(pool, %Conn.Agent{}, res: agent)
       iex> {:ok, id2} = Conn.Pool.init(pool, %Conn.Agent{}, res: agent)
       iex> {:ok, id3} = Conn.Pool.init(pool, %Conn.Agent{}, res: agent)
@@ -277,6 +309,7 @@ defmodule Conn.Pool do
       iex> Conn.Pool.empty?(pool, agent)
       false
       iex> Conn.Pool.pop(pool, id2)
+      iex> :timer.sleep(10)
       iex> Conn.Pool.empty?(pool, agent)
       true
 
@@ -284,26 +317,14 @@ defmodule Conn.Pool do
   """
   @spec pop(Conn.Pool.t(), Conn.id()) :: {:ok, Conn.info()} | :error
   def pop(pool, id) when is_integer(id) do
-    with {:ok, info} <- AgentMap.fetch(pool, {:conn, id}) do
-      AgentMap.delete(pool, {:conn, id})
+    AgentMap.get_and_update(pool, {:conn, id}, fn
+      nil ->
+        {:error}
 
-      AgentMap.cast(
-        pool,
-        fn
-          [[^id]] ->
-            :drop
-
-          [ids] ->
-            [List.delete(ids, id)]
-
-          [nil] ->
-            :id
-        end,
-        [{:res, Conn.resource(info.conn)}]
-      )
-
-      {:ok, info}
-    end
+      info ->
+        delete(pool, id)
+        {{:ok, info}, nil}
+    end)
   end
 
   @doc """
