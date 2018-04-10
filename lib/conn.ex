@@ -82,7 +82,7 @@ defprotocol Conn do
         def parse(conn, ":COMMANDS" <> _), do: {:ok, :methods, ""}
 
         def parse(conn, ":" <> data) do
-          case Regex.named_captures(~r[(?<cmd>.*)(:(?<args>.*))?], data) do
+          case Regex.named_captures(~r[(?<cmd>[^:]+)(?::(?<args>.*))?], data) do
             %{"cmd" => cmd, "args" => args} ->
               {:ok, {:call, cmd, args}, ""}
 
@@ -152,7 +152,7 @@ defprotocol Conn do
       iex> Conn.Pool.call(pool, res, "STOP")
       :ok
       iex> Conn.Pool.call(pool, res, "GET")
-      {:error, :closed}
+      {:error, :resource}
 
   `TextConn` could be used to connect to any server that implements above
   protocol.
@@ -249,6 +249,8 @@ defprotocol Conn do
 
     * `{:error, :closed}` — because connection is closed (use `init/2` to
       reopen);
+    * `{:error, :timeout, conn}` — because call took too long;
+    * `{:error, :notsupported, conn}` — because method is not supported;
     * `{:error, reason, conn}` where `reason` is an arbitrary term and call
       could be repeated immediately;
     * `{:error, reason, timeout, conn}` suggested to repeat call no sooner than
