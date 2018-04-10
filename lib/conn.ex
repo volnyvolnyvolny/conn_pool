@@ -124,8 +124,7 @@ defprotocol Conn do
       ...>           {:ok, {:call, "STOP", ""}, _rest} ->
       ...>              send(client, "ok")
       ...>
-      ...>           {:ok, {:call, _, ""}=c, _rest} ->
-      ...>              IO.inspect(c)
+      ...>           {:ok, {:call, _, ""}, _rest} ->
       ...>              send(client, "err:notsupported")
       ...>              loop(state)
       ...>

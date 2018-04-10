@@ -5,7 +5,7 @@ defmodule ConnPool.Mixfile do
     [
       app: :conn_pool,
       name: "Conn.Pool",
-      version: "0.1.0",
+      version: "0.2.0",
       elixir: "~> 1.6",
       deps: deps(),
       docs: docs(),
@@ -38,7 +38,7 @@ defmodule ConnPool.Mixfile do
   # Run "mix help deps" to learn about dependencies.
   defp deps do
     [
-      {:httpoison, "~> 1.0"},
+      {:httpoison, "~> 1.1"},
       {:earmark, "~> 1.2", only: :dev},
       {:agent_map, git: "git@gitlab.com:flomop/agent_map.git"},
       {:ex_doc, "~> 0.18", only: :dev},
