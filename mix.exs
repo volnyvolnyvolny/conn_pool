@@ -5,7 +5,7 @@ defmodule ConnPool.Mixfile do
     [
       app: :conn_pool,
       name: "Conn.Pool",
-      version: "0.2.0",
+      version: "0.2.1",
       elixir: "~> 1.6",
       deps: deps(),
       docs: docs(),

@@ -11,7 +11,7 @@ defmodule Conn.Pool do
   drop it and awaiting calls will be moved to another connection queue.
 
   Start pool via `start_link/1` or `start/1`. Add connections via `init/3` or
-  `Conn.init/2` → `put/2`. Make calls from pool via `call/4`.
+  `Conn.init/2` → `put!/2`. Make calls from pool via `call/4`.
 
   In the following examples, `%Conn.Agent{}` represents connection to some
   `Agent` that can be created separately or via `Conn.init/2`. Available methods
@@ -625,59 +625,68 @@ defmodule Conn.Pool do
           Process.sleep(to_ms(ttw))
         end
 
-        case Conn.call(info.conn, method, payload) do
-          {:noreply, conn} ->
-            {:ok, merge(info, conn) |> update_stats(method, start)}
+        try do
+          case Conn.call(info.conn, method, payload) do
+            {:noreply, conn} ->
+              {:ok, merge(info, conn) |> update_stats(method, start)}
 
-          {:noreply, t, conn} when t in [:infinity, :closed] ->
-            {:ok,
-             info
-             |> merge(conn, :infinity)
-             |> update_stats(method, start)
-             |> close(pool)}
+            {:noreply, t, conn} when t in [:infinity, :closed] ->
+              {:ok,
+               info
+               |> merge(conn, :infinity)
+               |> update_stats(method, start)
+               |> close(pool)}
 
-          {:noreply, timeout, conn} ->
-            {:ok,
-             info
-             |> merge(conn, timeout)
-             |> update_stats(method, start)}
+            {:noreply, timeout, conn} ->
+              {:ok,
+               info
+               |> merge(conn, timeout)
+               |> update_stats(method, start)}
 
-          {:reply, r, conn} ->
-            {{:ok, r}, merge(info, conn) |> update_stats(method, start)}
+            {:reply, r, conn} ->
+              {{:ok, r}, merge(info, conn) |> update_stats(method, start)}
 
-          {:reply, r, t, conn} when t in [:infinity, :closed] ->
-            {{:ok, r},
-             info
-             |> merge(conn, :infinity)
-             |> update_stats(method, start)
-             |> close(pool)}
+            {:reply, r, t, conn} when t in [:infinity, :closed] ->
+              {{:ok, r},
+               info
+               |> merge(conn, :infinity)
+               |> update_stats(method, start)
+               |> close(pool)}
 
-          {:reply, r, timeout, conn} ->
-            {{:ok, r},
-             info
-             |> merge(conn, timeout)
-             |> update_stats(method, start)}
+            {:reply, r, timeout, conn} ->
+              {{:ok, r},
+               info
+               |> merge(conn, timeout)
+               |> update_stats(method, start)}
 
-          {:error, :closed} ->
-            delete(pool, id)
-            if info.revive, do: revive(pool, id, info)
-            _call(%{info | closed: true}, args)
+            {:error, :closed} ->
+              delete(pool, id)
+              if info.revive, do: revive(pool, id, info)
+              _call(%{info | closed: true}, args)
 
-          {:error, reason, conn} ->
-            {{:error, reason}, merge(info, conn)}
+            {:error, reason, conn} ->
+              {{:error, reason}, merge(info, conn)}
 
-          {:error, reason, t, conn} when t in [:infinity, :closed] ->
-            {{:error, reason},
-             info
-             |> merge(conn, :infinity)
-             |> close(pool, :error)}
+            {:error, reason, t, conn} when t in [:infinity, :closed] ->
+              {{:error, reason},
+               info
+               |> merge(conn, :infinity)
+               |> close(pool, :error)}
 
-          {:error, reason, timeout, conn} ->
-            {{:error, reason}, merge(info, conn, timeout)}
+            {:error, reason, timeout, conn} ->
+              {{:error, reason}, merge(info, conn, timeout)}
 
-          err ->
-            Logger.warn("Conn.call returned unexpected: #{inspect(err)}.")
-            {err}
+            err ->
+              Logger.warn("Conn.call returned unexpected: #{inspect(err)}.")
+              {err}
+          end
+        rescue
+          e ->
+            if info.unsafe do
+              raise e
+            else
+              {:error, e}
+            end
         end
       else
         # ttw > 50 ms.

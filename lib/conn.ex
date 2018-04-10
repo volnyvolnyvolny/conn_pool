@@ -168,7 +168,8 @@ defprotocol Conn do
           last_call: pos_integer | :never,
           last_init: pos_integer | :never,
           timeout: timeout,
-          revive: boolean | :force
+          revive: boolean | :force,
+          unsafe: boolean
         }
 
   @enforce_keys [:conn]
@@ -183,7 +184,8 @@ defprotocol Conn do
     stats: %{},
     last_call: :never,
     last_init: :never,
-    timeout: 0
+    timeout: 0,
+    unsafe: false
   ]
 
   @type t :: term
