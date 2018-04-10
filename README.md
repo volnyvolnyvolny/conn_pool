@@ -102,11 +102,6 @@
       iex> Conn.Pool.call(pool, agent, :get, & &1+1)
       {:error, :resource}
 
-  ## Name registration
-
-  An `Conn.Pool` is bound to the same name registration rules as `GenServer`s.
-  Read more about it in the `GenServer` docs.
-
 ## Installation
 
 Add `conn_pool` to your list of dependencies in `mix.exs`:
