@@ -248,6 +248,8 @@ defprotocol Conn do
 
     * `{:error, :closed}` — because connection is closed (use `init/2` to
       reopen);
+    * `{:error, :timeout, conn}` — because call took too long;
+    * `{:error, :notsupported, conn}` — because method is not supported;
     * `{:error, reason, conn}` where `reason` is an arbitrary term and call
       could be repeated immediately;
     * `{:error, reason, timeout, conn}` suggested to repeat call no sooner than
