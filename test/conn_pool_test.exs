@@ -1,7 +1,7 @@
 defmodule ConnPoolTest do
   use ExUnit.Case
   doctest Conn.Pool
-#  doctest Conn
+  doctest Conn
 
   test "doc" do
     # {:ok, pool} = Conn.Pool.start_link()

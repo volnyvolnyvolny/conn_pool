@@ -124,7 +124,8 @@ defprotocol Conn do
       ...>           {:ok, {:call, "STOP", ""}, _rest} ->
       ...>              send(client, "ok")
       ...>
-      ...>           {:ok, {:call, _, ""}, _rest} ->
+      ...>           {:ok, {:call, _, ""}=c, _rest} ->
+      ...>              IO.inspect(c)
       ...>              send(client, "err:notsupported")
       ...>              loop(state)
       ...>
@@ -259,7 +260,7 @@ defprotocol Conn do
 
       iex> {:ok, conn} = Conn.init(%Conn.Agent{}, fn -> 42 end)
       iex> {:reply, 42, ^conn} = Conn.call(conn, :get, & &1)
-      iex> {:noreply, ^conn} = Conn.call(conn, :stop)
+      iex> {:noreply, :closed, ^conn} = Conn.call(conn, :stop)
       iex> Conn.call(conn, :get, & &1)
       {:error, :closed}
   """

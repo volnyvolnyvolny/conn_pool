@@ -22,6 +22,7 @@ defimpl Conn, for: TextConn do
 
   def call(%_{res: server} = conn, cmd, args \\ "") do
     if Process.alive?(server) do
+      IO.inspect({self(), (args && ":#{cmd}:#{args}") || ":#{cmd}"})
       send(server, {self(), (args && ":#{cmd}:#{args}") || ":#{cmd}"})
 
       receive do
@@ -51,6 +52,7 @@ defimpl Conn, for: TextConn do
   def parse(_conn, ":" <> data) do
     case Regex.named_captures(~r[(?<cmd>.*)(:(?<args>.*))?], data) do
       %{"cmd" => cmd, "args" => args} ->
+        IO.inspect({cmd, args})
         {:ok, {:call, cmd, args}, ""}
 
       nil ->
