@@ -38,7 +38,12 @@ defimpl Conn, for: Conn.HTTP do
 
   def call(%_{res: r} = conn, method, params)
       when method in [:get, :head, :post, :put, :delete, :options, :patch] do
-    case HTTPoison.request(method, r, params[:body] || "", params[:headers] || [], params) do
+    url =
+      if is_function(r) do
+        apply(r, params[:args])
+      end || r
+
+    case HTTPoison.request(method, url, params[:body] || "", params[:headers] || [], params) do
       {:ok, %HTTPoison.AsyncResponse{id: ref}} ->
         {:reply, ref, conn}
 
