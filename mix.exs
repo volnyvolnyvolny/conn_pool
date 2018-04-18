@@ -44,7 +44,7 @@ defmodule ConnPool.Mixfile do
     [
       {:httpoison, "~> 1.1"},
       {:earmark, "~> 1.2", only: :dev},
-      {:agent_map, git: "git@gitlab.com:flomop/agent_map.git"},
+      {:agent_map, "~> 0.9"},
       {:ex_doc, "~> 0.18", only: :dev},
       {:credo, "~> 0.8", only: :dev}
     ]

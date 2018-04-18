@@ -1,5 +1,5 @@
 %{
-  "agent_map": {:git, "git@gitlab.com:flomop/agent_map.git", "461f433b1a6992b0fd7e63aee21dbffb4222a04e", []},
+  "agent_map": {:hex, :agent_map, "0.9.9", "60cc9241024b0ee51b5cdec9de452fbd57afc2465b7b9ed869fde96c665d3026", [:mix], [], "hexpm"},
   "bunt": {:hex, :bunt, "0.2.0", "951c6e801e8b1d2cbe58ebbd3e616a869061ddadcc4863d0a2182541acae9a38", [:mix], [], "hexpm"},
   "certifi": {:hex, :certifi, "2.3.1", "d0f424232390bf47d82da8478022301c561cf6445b5b5fb6a84d49a9e76d2639", [:rebar3], [{:parse_trans, "3.2.0", [hex: :parse_trans, repo: "hexpm", optional: false]}], "hexpm"},
   "credo": {:hex, :credo, "0.8.10", "261862bb7363247762e1063713bb85df2bbd84af8d8610d1272cd9c1943bba63", [:mix], [{:bunt, "~> 0.2.0", [hex: :bunt, repo: "hexpm", optional: false]}], "hexpm"},
