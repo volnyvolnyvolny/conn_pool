@@ -51,7 +51,7 @@ defmodule ConnPool.Mixfile do
       maintainers: ["Valentin Tumanov"],
       licenses: ["MIT"],
       links: %{
-        "GitHub" => "https://github.com/garyposter/conn-pool",
+        "GitHub" => "https://github.com/zergera/conn-pool",
         "Docs" => "http://hexdocs.pm/conn_pool"
       }
     ]
