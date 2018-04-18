@@ -8,9 +8,7 @@ defmodule ConnPool.Mixfile do
       version: "0.2.1",
       description: """
         Connection pool helps storing, sharing and using connections. It also make its possible to use the 
-        same connection concurrently. For example, if there exists remote API accessible via websocket,
-        pool can provide shared access, making queues of calls. If connection is closed/expires — pool
-        will reinitialize or drop it and awaiting calls will be moved to another connection queue.
+        same connection concurrently.
       """,
       elixir: "~> 1.6",
       deps: deps(),
