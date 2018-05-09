@@ -13,7 +13,7 @@
   `Agent` that can be created separately or via `Conn.init/2`. Available methods
   of interaction with `Agent` are `:get`, `:get_and_update`, `:update` and
   `:stop` (see `Conn.methods!/1`). This type of connection means to exist only
-  as an example for doctests. More meaningful example would be `Conn.Plug`
+  as an example for doctests. More meaningful example would be `Conn.HTTP`
   wrapper. Also, see `Conn` docs for detailed example on `Conn` protocol
   implementation and use.
 
@@ -46,7 +46,7 @@
   `%Conn{}.extra` information that was given via `Conn.Pool.extra/3` was used to
   filter conn to be selected in `Conn.Pool.call/5` call.
 
-  In the following example connection will be added via `put/2`.
+  In the following example connection will be added via `put!/2`.
 
       iex> {:ok, pool} = Conn.Pool.start_link()
       iex> {:ok, agent} = Agent.start_link(fn -> 42 end)
@@ -109,7 +109,7 @@ Add `conn_pool` to your list of dependencies in `mix.exs`:
 ```elixir
 def deps do
   [
-    {:conn_pool, "~> 0.2.1"}
+    {:conn_pool, "~> 0.2"}
   ]
 end
 ```

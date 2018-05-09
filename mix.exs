@@ -5,16 +5,17 @@ defmodule ConnPool.Mixfile do
     [
       app: :conn_pool,
       name: "Conn.Pool",
-      version: "0.2.1",
+      version: "0.3.0",
       description: """
-        Connection pool helps storing, sharing and using connections. It also make its possible to use the 
-        same connection concurrently.
+        Connection pool helps storing, sharing and using connections. It also
+        make its possible to use the same connection concurrently.
       """,
       elixir: "~> 1.6",
       deps: deps(),
       docs: docs(),
       package: package(),
       aliases: aliases(),
+      source_url: "https://github.com/zergera/conn_pool",
       elixirc_paths: elixirc_paths(Mix.env())
     ]
   end
@@ -46,7 +47,7 @@ defmodule ConnPool.Mixfile do
       {:earmark, "~> 1.2", only: :dev},
       {:agent_map, "~> 0.9"},
       {:ex_doc, "~> 0.18", only: :dev},
-      {:credo, "~> 0.8", only: :dev}
+      {:credo, "~> 0.9", only: :dev}
     ]
   end
 
@@ -55,7 +56,7 @@ defmodule ConnPool.Mixfile do
       maintainers: ["Valentin Tumanov"],
       licenses: ["MIT"],
       links: %{
-        "GitHub" => "https://github.com/zergera/conn-pool",
+        "GitHub" => "https://github.com/zergera/conn_pool",
         "Docs" => "http://hexdocs.pm/conn_pool"
       }
     ]

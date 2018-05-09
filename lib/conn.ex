@@ -159,7 +159,7 @@ defprotocol Conn do
 
   @type info :: %Conn{
           conn: any,
-          init_args: any | nil,
+          init_args: any | [],
           extra: any | nil,
           ttl: pos_integer | :infinity,
           methods: [method],
@@ -215,6 +215,9 @@ defprotocol Conn do
     * `{:error, reason, timeout, conn}` when suggested to repeat `init/2` call
       after `timeout` ms.
 
+  You can safely raise inside `init/2`. `Conn.Pool` will handle this as `init/2`
+  returns `{:error, {:exit, raise}, conn}` tuple.
+
   ## Examples
 
       iex> {:ok, conn1} = Conn.init(%Conn.Agent{}, fn -> 42 end)
@@ -222,12 +225,12 @@ defprotocol Conn do
       iex> Conn.resource(conn1) == Conn.resource(conn2)
       true
   """
-  @spec init(Conn.t(), init_args) ::
+  @spec init(Conn.t(), init_args | []) ::
           {:ok, Conn.t()}
           | {:ok, timeout, Conn.t()}
           | {:error, :timeout | reason, Conn.t()}
           | {:error, :timeout | reason, timeout, Conn.t()}
-  def init(_conn, args \\ nil)
+  def init(_conn, args \\ [])
 
   @doc """
   Interacts using given connection, method and data.

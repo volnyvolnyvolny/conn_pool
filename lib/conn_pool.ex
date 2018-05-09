@@ -1,6 +1,4 @@
 defmodule Conn.Pool do
-  use Agent
-
   require Logger
 
   @moduledoc """
@@ -17,7 +15,7 @@ defmodule Conn.Pool do
   `Agent` that can be created separately or via `Conn.init/2`. Available methods
   of interaction with `Agent` are `:get`, `:get_and_update`, `:update` and
   `:stop` (see `Conn.methods!/1`). This type of connection means to exist only
-  as an example for doctests. More meaningful example would be `Conn.Plug`
+  as an example for doctests. More meaningful example would be `Conn.HTTP`
   wrapper. Also, see `Conn` docs for detailed example on `Conn` protocol
   implementation and use.
 
@@ -41,9 +39,9 @@ defmodule Conn.Pool do
       iex> Conn.Pool.call(pool, agent, :get, & &1.extra[:type] != :agent, & &1)
       {:error, :filter}
       #
-      iex> Conn.Pool.call(pool, agent, :badmethod)
+      iex> Conn.Pool.call(pool, agent, :badmethod, :payload)
       {:error, :method}
-      iex> Conn.Pool.call(pool, :badres, :badmethod)
+      iex> Conn.Pool.call(pool, :badres, :badmethod, :payload)
       {:error, :resource}
 
   In the above example connection was initialized and used directly from pool.
@@ -117,6 +115,17 @@ defmodule Conn.Pool do
   @type reason :: any
   @type filter :: (Conn.info() -> as_boolean(term()))
 
+  @doc """
+  Returns a specification to start a Conn.Pool under a supervisor. See
+  `Supervisor`.
+  """
+  def child_spec(opts) do
+    %{
+      id: Conn.Pool,
+      start: {Conn.Pool, :start_link, [opts]}
+    }
+  end
+
   # Generate uniq id.
   defp gen_id, do: now()
 
@@ -136,11 +145,14 @@ defmodule Conn.Pool do
   def start(opts \\ []), do: AgentMap.start(opts)
 
   @doc """
-  Initialize connection in a separate `Task` and use `put/2` to add connection
+  Initialize connection in a separate `Task` and use `put!/2` to add connection
   that is wrapped in `%Conn{}`.
 
   By default, init time is limited by `5000` ms and pool will revive closed
   connection using `init_args` provided.
+
+  You can safely raise inside `init/2`. `Conn.Pool` will handle this as `init/2`
+  returns `{:error, {:exit, raise}, conn}` tuple.
 
   ## Returns
 
@@ -152,7 +164,7 @@ defmodule Conn.Pool do
   @spec init(Conn.Pool.t(), Conn.t() | Conn.info(), any) ::
           {:ok, id} | {:error, :timeout | reason}
 
-  def init(pool, info_or_conn, init_args \\ nil)
+  def init(pool, info_or_conn, init_args \\ [])
 
   def init(pool, %Conn{conn: conn} = info, init_args) do
     task =

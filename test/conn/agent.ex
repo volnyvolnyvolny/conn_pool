@@ -1,7 +1,7 @@
 defmodule(Conn.Agent, do: defstruct([:res]))
 
 defimpl Conn, for: Conn.Agent do
-  def init(conn, nil) do
+  def init(conn, []) do
     if Process.alive?(conn.res) do
       {:ok, %Conn.Agent{res: conn.res}}
     else
