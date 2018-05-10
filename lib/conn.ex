@@ -157,37 +157,6 @@ defprotocol Conn do
   protocol.
   """
 
-  @type info :: %Conn{
-          conn: any,
-          init_args: any | [],
-          extra: any | nil,
-          ttl: pos_integer | :infinity,
-          methods: [method],
-          closed: boolean,
-          stats: %{required(method) => {non_neg_integer, pos_integer}},
-          last_call: pos_integer | :never,
-          last_init: pos_integer | :never,
-          timeout: timeout,
-          revive: boolean | :force,
-          unsafe: boolean
-        }
-
-  @enforce_keys [:conn]
-  defstruct [
-    :conn,
-    :init_args,
-    :extra,
-    :methods,
-    ttl: :infinity,
-    closed: false,
-    revive: false,
-    stats: %{},
-    last_call: :never,
-    last_init: :never,
-    timeout: 0,
-    unsafe: false
-  ]
-
   @type t :: term
   @type id :: non_neg_integer
 
@@ -215,8 +184,7 @@ defprotocol Conn do
     * `{:error, reason, timeout, conn}` when suggested to repeat `init/2` call
       after `timeout` ms.
 
-  You can safely raise inside `init/2`. `Conn.Pool` will handle this as `init/2`
-  returns `{:error, {:exit, raise}, conn}` tuple.
+  Raise inside the `init/2` call will not cause problems.
 
   ## Examples
 
@@ -253,7 +221,7 @@ defprotocol Conn do
 
     * `{:error, :closed}` — because connection is closed (use `init/2` to
       reopen);
-    * `{:error, :timeout, conn}` — because call took too long;
+    * `{:error, :timeout, conn}` — because call takes too long;
     * `{:error, :notsupported, conn}` — because method is not supported;
     * `{:error, reason, conn}` where `reason` is an arbitrary term and call
       could be repeated immediately;
@@ -332,10 +300,13 @@ defprotocol Conn do
   def resource(conn)
 
   @doc """
-  Methods of interactions available for connection. Can be http-methods: `:get`,
-  `:put`, `:post`, etc., or user defined arbitrary terms `:info`, `:say`,
-  `:ask`, `{:method, 1}` and so on. They represents types of interactions can be
-  done using given connection.
+  Methods of interactions available for connection. Can be HTTP-methods: `:get`,
+  `:put`, `:post`, etc., or custom terms `:info`, `:say`, `:ask`, `{:method, 1}`
+  and so on. They represents types of interactions can be done using given
+  connection.
+
+  It's taken to be that for arbitrary conn method list could not always be
+  preprogrammed or even stay permanent during it's lifecycle.
 
   ## Returns
 
@@ -345,6 +316,9 @@ defprotocol Conn do
   or raise.
 
   ## Examples
+
+      iex> Conn.methods!(%Conn.HTTP{})
+      [:get, :post, :put, :head, :delete, :patch, :options]
 
       iex> Conn.methods!(%Conn.Agent{})
       [:get, :get_and_update, :update, :stop]

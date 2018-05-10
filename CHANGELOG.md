@@ -33,5 +33,15 @@
 #### Conn.Pool
 
   * from now on default `init_args` in `Conn.Pool.init/2` are `[]`
-  * `Conn.init/2` can safely raise now. Pool interpret this as `Conn.init/2`
-  returns `{:error, {:exist, reason}, conn}`
+  * `Conn.init/2` can safely raise now. In this case pool returns `{:error,
+    {:exit, reason}}`.
+  * new `has_conn?/2`
+  * 
+
+### 4. Hard-deprecations
+
+#### Conn.Pool
+
+  * `init/3`
+  * `empty?/2` → `has_conns?/2`
+  * `info/2` → `info/3`

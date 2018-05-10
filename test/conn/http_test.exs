@@ -15,7 +15,7 @@ defmodule ConnHTTPTest do
     #
     # Also this conn could be added to pool:
     {:ok, pool} = Conn.Pool.start_link()
-    Conn.Pool.put!(pool, conn)
+    Conn.Pool.put!(pool, %Conn{conn: conn})
 
     {:ok, resp} = Conn.Pool.call(pool, :search, :get, follow_redirect: true)
     assert resp.body =~ "Google"

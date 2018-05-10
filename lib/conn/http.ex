@@ -15,14 +15,14 @@ defmodule Conn.HTTP do
       ...>   Conn.init(%Conn.HTTP{}, res: :search,
       ...>                           url: "https://google.com")
       iex> {:reply, resp, conn} =
-      ...>   Conn.call(conn, :get, body: "", headers: [], follow_redirect: true)
+      ...>   Conn.call(conn, :get, body: "", headers: [])
       iex> resp.body =~ "Google"
       true
       #
       # Also this conn could be added to pool:
       iex> {:ok, pool} = Conn.Pool.start_link()
-      iex> Conn.Pool.put!(pool, conn)
-      iex> {:ok, resp} = Conn.Pool.call(pool, :search, :get, follow_redirect: true)
+      iex> Conn.Pool.put!(pool, %Conn{conn: conn})
+      iex> {:ok, resp} = Conn.Pool.call(pool, :search, :get)
       iex> resp.body =~ "Google"
       true
 
@@ -33,7 +33,7 @@ defmodule Conn.HTTP do
       ...>                           mirrors: ["https://gooooooooooooogel.com",
       ...>                                     "https://duckduckgo.com"])
       iex> {:reply, resp, ^conn} =
-      ...>   Conn.call(conn, :get, follow_redirect: true)
+      ...>   Conn.call(conn, :get)
       iex> resp.body =~ "duck"
       true
 
@@ -44,7 +44,7 @@ defmodule Conn.HTTP do
       ...>                           url: &"https://goooogel.com?q=\#{&1}",
       ...>                           mirror: &"https://duckduckgo.com/?q=\#{&1}")
       iex> {:reply, resp, ^conn} =
-      ...>   Conn.call(conn, :get, args: ["follow the white rabbit"], follow_redirect: true)
+      ...>   Conn.call(conn, :get, args: ["follow the white rabbit"])
       iex> resp.body =~ "follow"
       true
       iex> resp.body =~ "duck"
@@ -56,6 +56,8 @@ defmodule Conn.HTTP do
 end
 
 defimpl Conn, for: Conn.HTTP do
+  @methods [:get, :post, :put, :head, :delete, :patch, :options]
+
   def init(conn, init_args \\ []) do
     u = init_args[:url] || init_args[:res] || raise(":url or :res must be provided!")
     r = init_args[:res] || u
@@ -89,12 +91,11 @@ defimpl Conn, for: Conn.HTTP do
 
   def parse(_conn, _data), do: {:error, :notimplemented}
 
-  def methods!(_conn), do: [:get, :post]
+  def methods!(_conn), do: @methods
 
   def call(conn, method, params \\ [])
 
-  def call(%_{url: u} = conn, method, params)
-      when method in [:get, :head, :post, :put, :delete, :options, :patch] do
+  def call(%_{url: u} = conn, method, params) when method in @methods do
     url =
       if is_function(u) do
         unless params[:args] do
@@ -110,15 +111,12 @@ defimpl Conn, for: Conn.HTTP do
 
     case HTTPoison.request(method, url, params[:body] || "", params[:headers] || [], params) do
       {:ok, %HTTPoison.AsyncResponse{id: ref}} ->
-        IO.inspect(:x)
         {:reply, ref, conn}
 
       {:ok, %HTTPoison.Response{status_code: 200} = resp} ->
-        IO.inspect(:y)
         {:reply, resp, conn}
 
       {:ok, resp} ->
-        IO.inspect(:z)
         case conn.mirrors do
           [] ->
             {:reply, resp, conn}
@@ -134,7 +132,6 @@ defimpl Conn, for: Conn.HTTP do
         end
 
       {:error, %HTTPoison.Error{reason: r}} ->
-        IO.inspect(:a)
         {:error, r, conn}
     end
   end

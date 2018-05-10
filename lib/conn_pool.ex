@@ -1,79 +1,128 @@
+defmodule Conn.Info do
+  @moduledoc false
+
+  @type t :: %__MODULE__{
+          conn: Conn.t(),
+          init_args: any | [],
+          extra: any | nil,
+          ttl: pos_integer | :infinity,
+          methods: [method],
+          force_methods: [method],
+          closed: boolean,
+          stats: %{required(method) => {non_neg_integer, pos_integer}},
+          last_call: pos_integer | :never,
+          last_init: pos_integer | :never,
+          timeout: timeout,
+          force_timeout: timeout,
+          revive: boolean | :force,
+          unsafe: boolean
+        }
+
+  @enforce_keys [:conn]
+  defstruct [
+    :conn,
+    :init_args,
+    :extra,
+    :methods,
+    ttl: :infinity,
+    force_timeout: false,
+    force_methods: false,
+    closed: false,
+    revive: false,
+    stats: %{},
+    last_call: :never,
+    last_init: :never,
+    timeout: 0,
+    unsafe: false
+  ]
+
+  defstruct []
+end
+
 defmodule Conn.Pool do
   require Logger
 
   @moduledoc """
   Connection pool helps storing, sharing and using connections. It also make its
-  possible to use the same connection concurrently. For example, if there exists
-  remote API accessible via websocket, pool can provide shared access, making
-  queues of calls. If connection is closed/expires — pool will reinitialize or
-  drop it and awaiting calls will be moved to another connection queue.
+  possible to use the same connection concurrently. For example, if there are
+  many similar APIs, the pool can provide shared concurrent access, making call
+  queues, if necessary. If any of conns became closed/expires — pool will
+  reinitialize or drop defective connection and awaiting calls will be moved to
+  the queue of another connection.
 
-  Start pool via `start_link/1` or `start/1`. Add connections via `init/3` or
-  `Conn.init/2` → `put!/2`. Make calls from pool via `call/4`.
+  Start pool via `start_link/1` or `start/1`. Initialize connection externally
+  via `Conn.init/2` and add it to the pool with `put!/2`. Make calls directly
+  from pool via `call/4`. For example:
 
-  In the following examples, `%Conn.Agent{}` represents connection to some
-  `Agent` that can be created separately or via `Conn.init/2`. Available methods
-  of interaction with `Agent` are `:get`, `:get_and_update`, `:update` and
-  `:stop` (see `Conn.methods!/1`). This type of connection means to exist only
-  as an example for doctests. More meaningful example would be `Conn.HTTP`
-  wrapper. Also, see `Conn` docs for detailed example on `Conn` protocol
-  implementation and use.
+      iex> {:ok, pool} = Conn.Pool.start_link()
+      iex> {:ok, conn} =
+      ...>   Conn.init(%Conn.HTTP{}, res: :search,
+      ...>                           url: "https://google.com")
+      iex> Conn.Pool.put!(pool, conn)
+      :ok
+      iex> {:ok, resp} = Conn.Pool.call(pool, :search, :get)
+      iex> resp.body =~ "Google"
+      true
+
+  After initialization of HTTP connection (here it's simply returns
+  `%Conn.HTTP{res: :search, url: "https://google.com", mirrors: []}`) we
+  transfer control of it to `pool`, so when `Conn.Pool.call/3` call made, `pool`
+  decides which conn to be used for call (with resource and method identifiers).
+
+  It's possible to interact not only with HTTP resources. Any abstract resource
+  can be used. In the following examples, `%Conn.Agent{}` represents connection
+  to some `Agent` that can be created with `Conn.init/2`. Available methods of
+  interaction are `:get`, `:get_and_update`, `:update` and `:stop` (see
+  `Conn.methods!/1`). This type of connection means to exist only as an example,
+  see `Conn` protocol for details.
 
       iex> {:ok, pool} = Conn.Pool.start_link()
       iex> {:ok, agent} = Agent.start_link(fn -> 42 end)
-      iex> {:ok, id} = Conn.Pool.init(pool, %Conn.Agent{}, res: agent)
-      iex> Conn.Pool.extra(pool, id, type: :agent) # add `extra` info
-      {:ok, nil}
-      #
-      # Pool wraps conn into `%Conn{}` struct.
-      iex> {:ok, info} = Conn.Pool.info(pool, id)
-      iex> info.extra
-      [type: :agent]
-      iex> info.methods
+      iex> {:ok, conn} = Conn.init(%Conn.Agent{}, res: agent)
+      iex> Conn.Pool.put!(pool, conn, extra: [type: :agent])
+      :ok
+      iex> Conn.Pool.info(pool, agent, :extra)
+      [[type: :agent]]
+      iex> Conn.Pool.info(pool, agent, :methods)
       [:get, :get_and_update, :update, :stop]
-      iex> ^agent = Conn.resource(info.conn)
+      iex> [[^conn]] = Conn.Pool.info(pool, agent, :conn)
+      iex> ^agent = Conn.resource(conn)
+      ...>
+      ...> # Now we make call to the resource `agent`:
       iex> Conn.Pool.call(pool, agent, :get, & &1)
       {:ok, 42}
-      #
-      # Now we use filter (& &1.extra[:type] != :agent).
-      iex> Conn.Pool.call(pool, agent, :get, & &1.extra[:type] != :agent, & &1)
-      {:error, :filter}
-      #
-      iex> Conn.Pool.call(pool, agent, :badmethod, :payload)
-      {:error, :method}
-      iex> Conn.Pool.call(pool, :badres, :badmethod, :payload)
-      {:error, :resource}
 
-  In the above example connection was initialized and used directly from pool.
-  `%Conn{}.extra` information that was given via `Conn.Pool.extra/3` was used to
-  filter conn to be selected in `Conn.Pool.call/5` call.
+  See corresponding methods for details. What if in the last example we'll stop
+  `agent`
 
-  In the following example connection will be added via `put/2`.
+  In the following example connection will be added via `put!/2`.
 
       iex> {:ok, pool} = Conn.Pool.start_link()
       iex> {:ok, agent} = Agent.start_link(fn -> 42 end)
       iex> {:ok, conn} = Conn.init(%Conn.Agent{}, res: agent)
       iex> Conn.Pool.put!(pool, %Conn{conn: conn, revive: true})
-      iex> Process.alive?(agent) && not Conn.Pool.empty?(pool, agent)
+      iex> Process.alive?(agent) && Conn.Pool.has_conns?(pool, agent)
       true
       # There are conns for resource `agent` in this pool.
       iex> Conn.Pool.call(pool, agent, :stop)
       :ok
-      iex> not Process.alive?(agent)
-      true
+      iex> Process.alive?(agent)
+      false
       iex> :timer.sleep(10)
-      iex> Conn.Pool.empty?(pool, agent)
-      true
-      # Now conn is `:closed` and will be reinitialized by pool,
+      iex> Conn.Pool.has_conns?(pool, agent)
+      false
+      # Now conn is `:closed` and will be revived by pool,
       # but:
-      iex> {:error, :dead, :infinity, conn} == Conn.init(conn)
-      true
-      # `Conn.init/2` suggests to never reinitialize again
-      # (`:infinity` timeout) so pool will just drop this conn.
+      iex> {:error, :dead, :infinity, conn} = Conn.init(conn)
+      ...>
+      ...> # `Conn.init/2` suggests to never reinitialize again
+      ...> # (`:infinity` timeout) so pool will just drop this conn.
+      ...> # — this suggests to never revive conn again.
       iex> Conn.Pool.resources(pool)
       []
 
-  Also, TTL value could be provided. By default expired connection is revived.
+  Also, TTL value could be provided. By default, expired connection will be
+  revived.
 
       iex> {:ok, pool} = Conn.Pool.start_link()
       iex> {:ok, agent} = Agent.start_link(fn -> 42 end)
@@ -115,6 +164,16 @@ defmodule Conn.Pool do
   @type reason :: any
   @type filter :: (Conn.info() -> as_boolean(term()))
 
+  @type opts :: [
+          ttl: timeout,
+          init_args: any | [],
+          extra: any | nil,
+          methods: [Conn.method()],
+          force_timeout: timeout,
+          revive: boolean | :force,
+          unsafe: boolean
+        ]
+
   @doc """
   Returns a specification to start a Conn.Pool under a supervisor. See
   `Supervisor`.
@@ -126,6 +185,34 @@ defmodule Conn.Pool do
     }
   end
 
+  # @doc """
+  # Builds and overrides a conn specification. Similar to `start_link/2` and
+  # `init/2`, it expects a `module`, `{module, arg}` or a map as the child
+  # specification.
+
+  # If a module is given, the specification is retrieved by calling
+  # `module.child_spec(arg)`.
+
+  # After the child specification is retrieved, the fields on `config`
+  # are directly applied on the child spec. If `config` has keys that
+  # do not map to any child specification field, an error is raised.
+
+  # See the "Child specification" section in the module documentation
+  # for all of the available keys for overriding.
+
+  # ## Examples
+
+  # This function is often used to set an `:id` option when the same module needs
+  # to be started multiple times in the supervision tree:
+
+  #     Supervisor.child_spec({Agent, fn -> :ok end}, id: {Agent, 1})
+  #     #=> %{id: {Agent, 1},
+  #     #=>   start: {Agent, :start_link, [fn -> :ok end]}}
+  # """
+  # defp conn_spec() do
+  #   []
+  # end
+
   # Generate uniq id.
   defp gen_id, do: now()
 
@@ -133,7 +220,8 @@ defmodule Conn.Pool do
   defp now(), do: System.monotonic_time()
 
   @doc """
-  Starts pool as a linked process.
+  Starts pool as a linked process. The same options as for
+  `GenServer.start_link/3` could be provided.
   """
   @spec start_link(GenServer.options()) :: GenServer.on_start()
   def start_link(opts \\ []), do: AgentMap.start_link(opts)
@@ -145,47 +233,38 @@ defmodule Conn.Pool do
   def start(opts \\ []), do: AgentMap.start(opts)
 
   @doc """
-  Initialize connection in a separate `Task` and use `put!/2` to add connection
-  that is wrapped in `%Conn{}`.
+  Changes options of connection with given `id`.
 
-  By default, init time is limited by `5000` ms and pool will revive closed
-  connection using `init_args` provided.
+  This call returns given `id` without changes and raise if there is no
+  connection with such `id`.
 
-  You can safely raise inside `init/2`. `Conn.Pool` will handle this as `init/2`
-  returns `{:error, {:exit, raise}, conn}` tuple.
+  It is an eqivalent of the:
+
+      {}
 
   ## Returns
 
+    * id
     * `{:ok, id}` in case of `Conn.init/2` returns `{:ok, conn}`, where `id` is
       the identifier that can be used to refer `conn`;
     * `{:error, :timeout}` if `Conn.init/2` returns `{:ok, :timeout}`;
     * `{:error, reason}` in case `Conn.init/2` returns an arbitrary error.
+
+  ## Examples
   """
-  @spec init(Conn.Pool.t(), Conn.t() | Conn.info(), any) ::
-          {:ok, id} | {:error, :timeout | reason}
+  def tweak!(pool, id, opts) when is_integer(id) do
+    case pop(pool, id) do
+      {:ok, {conn, old_opts}} ->
+        opts =
+          old_opts
+          |> Keyword.merge(opts)
+          |> Keyword.put(:id, id)
 
-  def init(pool, info_or_conn, init_args \\ [])
+        put!(pool, conn, opts)
 
-  def init(pool, %Conn{conn: conn} = info, init_args) do
-    task =
-      Task.async(fn ->
-        Conn.init(conn, init_args)
-      end)
-
-    case Task.yield(task, :infinity) || Task.shutdown(task) do
-      {:ok, {:ok, conn}} ->
-        {:ok, put!(pool, %{info | conn: conn, init_args: init_args})}
-
-      {:ok, err} ->
-        err
-
-      nil ->
-        {:error, :timeout}
+      _err ->
+        raise("Pool knows nothing about conn with id #{id}.")
     end
-  end
-
-  def init(pool, conn, init_args) do
-    init(pool, %Conn{conn: conn}, init_args)
   end
 
   # Add conn to pool.
@@ -208,7 +287,7 @@ defmodule Conn.Pool do
   end
 
   defp add_methods!(info) do
-    if info.methods && is_list(info.methods) do
+    if info.methods do
       info
     else
       case Conn.methods!(info.conn) do
@@ -218,51 +297,44 @@ defmodule Conn.Pool do
         methods when is_list(methods) ->
           %{info | methods: methods}
 
-        ret ->
+        err ->
           raise("""
             Conn.methods!/1 call expected to return [method]
-            or {[method], updated conn}, but instead #{inspect(ret)} returned.
+            or {[method], updated conn}, but instead #{inspect(err)} returned.
           """)
       end
     end
   end
 
   @doc """
-  Adds given `%Conn{}` to pool, returning id to refer it later.
-  This call always refresh data cached in `%Conn{}.methods`.
+  Adds an already initialized `conn` to the `pool`.
+
+  Returns `:ok` no matter what.
+
+  If `:method` option is not provided, `Conn.method!/1` call will be made and
+  returned list will be cached.
 
   ## Example
 
       iex> {:ok, pool} = Conn.Pool.start_link()
       iex> {:ok, conn} = Conn.init(%Conn.Agent{}, fn -> 42 end)
-      iex> ttl = 100 # ms
-      iex> info = %Conn{
-      ...>   conn: conn,
-      ...>   extra: :extra,
-      ...>   ttl: ttl
-      ...> }
-      iex> id = Conn.Pool.put!(pool, info)
-      iex> {:ok, info} = Conn.Pool.info(pool, id)
-      iex> ^ttl = info.ttl
-      iex> {:ok, info} = Conn.Pool.info(pool, id)
-      iex> info.extra
-      :extra
-      #
-      # let's make some tweak
-      #
-      iex> {:ok, info} = Conn.Pool.pop(pool, id)
-      iex> id = Conn.Pool.put!(pool, %{info| ttl: :infinity})
-      iex> {:ok, info} = Conn.Pool.info(pool, id)
-      iex> info.ttl
-      :infinity
+      iex> Conn.Pool.put!(pool, conn, extra: :secret, ttl: 100)
+      :ok
+      iex> Conn.Pool.info(pool, Conn.resource(conn), :extra)
+      [:secret]
+      iex> Conn.Pool.info(pool, Conn.resource(conn), :ttl)
+      [100]
+      iex> Conn.Pool.info(pool, Conn.resource(conn), :methods)
+      [:get, :get_and_update, :update, :stop]
   """
-  @spec put!(Conn.Pool.t(), Conn.info()) :: id
-  def put!(pool, info) do
+  @spec put!(Conn.Pool.t(), Conn.t(), opts \\ []) :: :ok
+  def put!(pool, conn, opts \\ []) do
+    info = struct(%Conn.Info{conn: conn}, opts)
     add(pool, add_methods!(info))
   end
 
   defp delete(pool, id) do
-    case info(pool, id) do
+    case AgentMap.fetch(pool, {:conn, id}) do
       {:ok, info} ->
         AgentMap.delete(pool, {:conn, id})
 
@@ -281,19 +353,20 @@ defmodule Conn.Pool do
           [{:res, Conn.resource(info.conn)}]
         )
 
-      :error ->
+      err ->
         :ignore
     end
   end
 
   @doc """
-  Deletes connection and returns corresponding `%Conn{}` struct.
+  Deletes connection with given `id` from `pool` and returns it and
+  corresponding opts.
 
-  Returns only after all calls awaiting execution on this conn are made.
+  Returns only after all calls that use this conn are executed.
 
   ## Returns
 
-    * `{:ok, Conn struct}` in case conn with such id exists;
+    * `{:ok, {conn, opts}}` in case conn with such `id` exists;
     * `:error` — otherwise.
 
   ## Examples
@@ -322,7 +395,7 @@ defmodule Conn.Pool do
       iex> Conn.Pool.extra(pool, id1, :takeme)
       {:ok, nil}
       iex> Conn.Pool.extra(pool, id3, :takeme)
-      iex> Conn.Pool.pop(pool, agent, & &1.extra == :takeme)
+      iex> Conn.Pool.pop(pool, agent, & &1[:extra] == :takeme)
       iex> Conn.Pool.empty?(pool, agent)
       false
       iex> Conn.Pool.pop(pool, id2)
@@ -332,7 +405,7 @@ defmodule Conn.Pool do
 
   Also, see example for `put!/2`.
   """
-  @spec pop(Conn.Pool.t(), Conn.id()) :: {:ok, Conn.info()} | :error
+  @spec pop(Conn.Pool.t(), Conn.id()) :: {:ok, {Conn.t(), opts}} | :error
   def pop(pool, id) when is_integer(id) do
     AgentMap.get_and_update(pool, {:conn, id}, fn
       nil ->
@@ -340,15 +413,30 @@ defmodule Conn.Pool do
 
       info ->
         delete(pool, id)
-        {{:ok, info}, nil}
+
+        opts =
+          info
+          |> Map.take([
+            :revive,
+            :ttl,
+            :force_timeout,
+            :force_methods,
+            :extra,
+            :init_args,
+            :revive,
+            :unsafe
+          ])
+          |> Enum.into([])
+
+        {{:ok, info.conn, opts}, nil}
     end)
   end
 
   @doc """
   Pops conns to `resource` that satisfy `filter`.
   """
-  @spec pop(Conn.Pool.t(), Conn.resource(), filter) :: [Conn.info()]
-  def pop(pool, resource, filter) when is_function(filter, 1) do
+  @spec pop(Conn.Pool.t(), Conn.resource(), filter) :: [{Conn.t, opts}]
+  def pop(pool, resource, filter \\ fn _ -> true end) do
     pool = AgentMap.new(pool)
     ids = pool[{:res, resource}] || []
 
@@ -369,7 +457,7 @@ defmodule Conn.Pool do
   end
 
   @doc """
-  Update every conn to `resource` with `fun`.
+  Updates every conn to `resource` with `fun`.
   This function always returns `:ok`.
 
   ## Example
@@ -378,7 +466,7 @@ defmodule Conn.Pool do
       iex> {:ok, agent} = Agent.start(fn -> 42 end)
       iex> Conn.Pool.init(pool, %Conn.Agent{}, res: agent)
       iex> Conn.Pool.init(pool, %Conn.Agent{}, res: agent)
-      iex> Conn.Pool.call(pool, agent, :get, & &1.extra == :extra, & &1)
+      iex> Conn.Pool.call(pool, agent, :get, & &1[:extra] == :extra, & &1)
       {:error, :filter}
       #
       iex> Conn.Pool.update(pool, agent, & %{&1 | extra: :extra})
@@ -386,7 +474,7 @@ defmodule Conn.Pool do
       iex> Conn.Pool.call(pool, agent, :get, & &1.extra == :extra, & &1)
       {:ok, 42}
   """
-  @spec update(Conn.Pool.t(), Conn.resource(), (Conn.info() -> Conn.info())) :: :ok
+  @spec update(Conn.Pool.t(), Conn.resource(), (opts -> opts)) :: :ok
   def update(pool, resource, fun) when is_function(fun, 1) do
     update(pool, resource, fn _ -> true end, fun)
   end
@@ -413,7 +501,7 @@ defmodule Conn.Pool do
       iex> Conn.Pool.call(pool, agent, :get, filter, & &1)
       {:error, :filter}
   """
-  @spec update(Conn.Pool.t(), Conn.resource(), filter, (Conn.info() -> Conn.info())) :: :ok
+  @spec update(Conn.Pool.t(), Conn.resource(), filter, (opts -> opts)) :: :ok
   def update(pool, resource, filter, fun) when is_function(fun, 1) and is_function(filter, 1) do
     pool = AgentMap.new(pool)
     ids = pool[{:res, resource}] || []
@@ -441,25 +529,6 @@ defmodule Conn.Pool do
     end
 
     :ok
-  end
-
-  @doc """
-  Is `pool` has conns to the given `resource`?
-  """
-  @spec empty?(Conn.Pool.t(), Conn.resource()) :: boolean
-  def empty?(pool, resource) do
-    not AgentMap.has_key?(pool, {:res, resource})
-  end
-
-  @doc """
-  Returns all the known resources.
-  """
-  @spec resources(Conn.Pool.t()) :: [Conn.resource()]
-  def resources(pool) do
-    Enum.flat_map(AgentMap.keys(pool), fn
-      {:res, r} -> [r]
-      _ -> []
-    end)
   end
 
   # Returns {:ok, ids} | {:error, :resources} | {:error, method}
@@ -731,7 +800,7 @@ defmodule Conn.Pool do
 
     * `{:error, :resource}` if there is no conns to given `resource`;
     * `{:error, :method}` if there exists conns to given `resource` but they does
-    not provide given `method` of interaction;
+      not provide given `method` of interaction;
     * `{:error, :filter}` if there is no conns satisfying `filter`;
 
     * `{:error, :timeout}` if `Conn.call/3` returned `{:error, :timeout, _}`
@@ -743,6 +812,21 @@ defmodule Conn.Pool do
   connection (see `%Conn{} :penalties` field).
 
     * `{:ok, reply} | :ok` in case of success.
+
+
+        #
+      # Now we'll use filter (& &1.extra[:type] != :agent).
+      iex> Conn.Pool.call(pool, agent, :get, & &1.extra[:type] != :agent, & &1)
+      {:error, :filter}
+      #
+      iex> Conn.Pool.call(pool, agent, :badmethod, :payload)
+      {:error, :method}
+      iex> Conn.Pool.call(pool, :badres, :badmethod, :payload)
+      {:error, :resource}
+
+  In the above example connection was initialized and used directly from pool.
+  `%Conn{}.extra` information that was given via `Conn.Pool.extra/3` was used to
+  filter conn to be selected in `Conn.Pool.call/5` call.
   """
   @spec call(Conn.Pool.t(), Conn.resource(), Conn.method(), any) ::
           :ok | {:ok, Conn.reply()} | {:error, :resource | :method | :timeout | reason}
@@ -760,60 +844,131 @@ defmodule Conn.Pool do
     end
   end
 
+  # @doc """
+  # `:extra` field of `%Conn{}` is intended for filtering conns while making call.
+  # Calling `extra/3` will change `:extra` field of connection with given `id`,
+  # while returning the old value in form of `{:ok, old extra}` or `:error` if
+  # pool don't known conn with such id.
+
+  # ## Example
+
+  #     iex> {:ok, pool} = Conn.Pool.start_link()
+  #     iex> {:ok, agent} = Agent.start(fn -> 42 end)
+  #     iex> {:ok, id} = Conn.Pool.init(pool, %Conn.Agent{}, res: agent)
+  #     iex> Conn.Pool.extra(pool, id, :extra)
+  #     {:ok, nil}
+  #     iex> Conn.Pool.extra(pool, id, :some)
+  #     {:ok, :extra}
+  #     iex> badid = -1
+  #     iex> Conn.Pool.extra(pool, badid, :some)
+  #     :error
+  #     #
+  #     iex> filter = & &1.extra == :extra
+  #     iex> Conn.Pool.call(pool, agent, :get, filter, & &1)
+  #     {:error, :filter}
+  #     #
+  #     # but:
+  #     iex> Conn.Pool.call(pool, agent, :get, & &1.extra == :some, & &1)
+  #     {:ok, 42}
+  # """
+  # @spec extra(Conn.Pool.t(), id, any) :: {:ok, any} | :error
+  # def extra(pool, id, extra) do
+  #   with {:ok, info} <- info(pool, id) do
+  #     AgentMap.put(pool, {:conn, id}, %{info | extra: extra})
+  #     {:ok, info.extra}
+  #   end
+  # end
+
   @doc """
-  `:extra` field of `%Conn{}` is intended for filtering conns while making call.
-  Calling `extra/3` will change `:extra` field of connection with given `id`,
-  while returning the old value in form of `{:ok, old extra}` or `:error` if
-  pool don't known conn with such id.
+  Retrives info about `prop`erty of conn with given `id`.
 
-  ## Example
+  Returns `{:ok, info}` if `pool` has conn with such `id`, or `:error`
+  otherwise.
 
-      iex> {:ok, pool} = Conn.Pool.start_link()
-      iex> {:ok, agent} = Agent.start(fn -> 42 end)
-      iex> {:ok, id} = Conn.Pool.init(pool, %Conn.Agent{}, res: agent)
-      iex> Conn.Pool.extra(pool, id, :extra)
-      {:ok, nil}
-      iex> Conn.Pool.extra(pool, id, :some)
-      {:ok, :extra}
-      iex> badid = -1
-      iex> Conn.Pool.extra(pool, badid, :some)
-      :error
-      #
-      iex> filter = & &1.extra == :extra
-      iex> Conn.Pool.call(pool, agent, :get, filter, & &1)
-      {:error, :filter}
-      #
-      # but:
-      iex> Conn.Pool.call(pool, agent, :get, & &1.extra == :some, & &1)
-      {:ok, 42}
-  """
-  @spec extra(Conn.Pool.t(), id, any) :: {:ok, any} | :error
-  def extra(pool, id, extra) do
-    with {:ok, info} <- info(pool, id) do
-      AgentMap.put(pool, {:conn, id}, %{info | extra: extra})
-      {:ok, info.extra}
-    end
-  end
+  ## Properties
 
-  @doc """
-  Retrives connection wraped in a `%Conn{}`.
-  Returns `{:ok, Conn.info}` or `:error`.
+    * `extra` — extra info used to select and identify connection;
+    * `ttl` — time (in ms) to live before conn will be closed and revived if such is
+      sad;
+    * `force_timeout` — minimal timeout (in ms) between any two `Conn.call/3`s
+      or force if there is no such timeout;
+    * `revive` — should this conn be revived if it's live time came to an end?
+      Can be `true`, `false` or `:force` if to revive even if error happend;
+    * `closed` — if this conn closed?
+    * `unsafe` — if unhandled error in `Conn.call/3` will exit `pool`?
+    * `methods` — list of methods used;
+    * `stats` — statistics on method use in form of `%{method => {avg duration
+      of call in ms, number of calls}}`;
+    * `init_args` — arguments used for conn initialization on revive.
 
   ## Example
 
       iex> {:ok, pool} = Conn.Pool.start_link()
       iex> {:ok, id} = Conn.Pool.init(pool, %Conn.Agent{}, fn -> 42 end)
-      iex> {:ok, info} = Conn.Pool.info(pool, id)
-      iex> info.extra
-      nil
-      iex> Conn.Pool.extra(pool, id, :extra)
+      iex> Conn.Pool.info(pool, id, :extra)
       {:ok, nil}
-      iex> {:ok, info} = Conn.Pool.info(pool, id)
-      iex> info.extra
-      :extra
+      iex> Conn.Pool.tweak!(pool, id, extra: :secret_conn)
+      iex> Conn.Pool.info(pool, id, :extra)
+      {:ok, :secret}
   """
-  @spec info(Conn.Pool.t(), id) :: {:ok, %Conn{}} | :error
-  def info(pool, id) when is_integer(id) do
-    AgentMap.fetch(pool, {:conn, id})
+  @spec info(
+          Conn.Pool.t(),
+          Conn.resource,
+          filter,
+          :conn
+          | :extra
+          | :ttl
+          | :timeout
+          | :force_timeout
+          | :revive
+          | :closed
+          | :unsafe
+          | :methods
+          | :stats
+          | :init_args
+        ) :: [any]
+  def info(pool, Conn.resource, filter \\ fn _ -> true end, prop)
+      when prop in [
+             :conn,
+             :ttl,
+             :timeout,
+             :force_timeout,
+             :revive,
+             :closed,
+             :unsafe,
+             :methods,
+             :stats,
+             :init_args
+           ] do
+    case AgentMap.fetch(pool, {:conn, id}) do
+      {:ok, info} ->
+        {:ok, Map.get(info, prop)}
+
+      err ->
+        err
+    end
+  end
+
+  @doc """
+  Returns all the resources known by `pool`.
+  """
+  @spec resources(Conn.Pool.t()) :: [Conn.resource()]
+  def resources(pool) do
+    Enum.flat_map(AgentMap.keys(pool), fn
+      {:res, r} -> [r]
+      _ -> []
+    end)
+  end
+
+  @doc """
+  Is `pool` has conns to the given `resource`?
+
+  Also, filter argument could be provided. Filter is a fun that takes opts as an
+  argument and returns boolean value.
+  """
+  @spec has_conns?(Conn.Pool.t(), Conn.resource()) :: boolean
+  def has_conns?(pool, resource, filter \\ fn _ -> true end) do
+    raise :TODO
+    AgentMap.has_key?(pool, {:res, resource})
   end
 end
