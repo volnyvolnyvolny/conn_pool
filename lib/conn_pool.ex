@@ -4,7 +4,7 @@ defmodule Conn.Pool do
   require Logger
 
   @moduledoc """
-  Connection pool helps storing, sharing and using connections. It also make its
+  Connection pool helps storing and sharing connections. It also make its
   possible to use the same connection concurrently. For example, if there are
   many similar APIs, the pool can provide shared concurrent access, making call
   queues, if necessary. If any of conns became closed/expires — pool will
@@ -12,7 +12,7 @@ defmodule Conn.Pool do
   the queue of another connection.
 
   Start pool via `start_link/1` or `start/1`. Initialize connection externally
-  via `Conn.init/2` and add it to the pool with `put!/2`. Make calls directly
+  via `Conn.init/2` and add it to the pool with `put!/3`. Make calls directly
   from pool via `call/4`. For example:
 
       iex> {:ok, pool} = Conn.Pool.start_link()
@@ -119,9 +119,8 @@ defmodule Conn.Pool do
   An `Conn.Pool` is bound to the same name registration rules as `GenServer`s.
   Read more about it in the `GenServer` docs.
   """
-
+  @type id :: non_neg_integer
   @type t :: GenServer.t()
-  @type id :: pos_integer
   @type reason :: any
   @type filter :: (Conn.info() -> as_boolean(term()))
   @type prop ::
@@ -152,11 +151,11 @@ defmodule Conn.Pool do
 
   @props [:conn, :stats, @opts]
 
-  @type opts :: %{
+  @type opts :: [
           ttl: timeout,
           init_args: any | [],
           extra: any | nil,
-          closed: boolean,
+          #          closed: boolean,
           revive: boolean | :force,
           methods: [Conn.method()],
           only: [Conn.method()],
@@ -164,7 +163,7 @@ defmodule Conn.Pool do
           force_timeout: timeout,
           revive: boolean | :force,
           unsafe: boolean
-        }
+        ]
 
   @doc """
   Returns a specification to start a `Conn.Pool` under a supervisor. See
@@ -176,34 +175,6 @@ defmodule Conn.Pool do
       start: {Conn.Pool, :start_link, [opts]}
     }
   end
-
-  # @doc """
-  # Builds and overrides a conn specification. Similar to `start_link/2` and
-  # `init/2`, it expects a `module`, `{module, arg}` or a map as the child
-  # specification.
-
-  # If a module is given, the specification is retrieved by calling
-  # `module.child_spec(arg)`.
-
-  # After the child specification is retrieved, the fields on `config`
-  # are directly applied on the child spec. If `config` has keys that
-  # do not map to any child specification field, an error is raised.
-
-  # See the "Child specification" section in the module documentation
-  # for all of the available keys for overriding.
-
-  # ## Examples
-
-  # This function is often used to set an `:id` option when the same module needs
-  # to be started multiple times in the supervision tree:
-
-  #     Supervisor.child_spec({Agent, fn -> :ok end}, id: {Agent, 1})
-  #     #=> %{id: {Agent, 1},
-  #     #=>   start: {Agent, :start_link, [fn -> :ok end]}}
-  # """
-  # defp conn_spec() do
-  #   []
-  # end
 
   @doc """
   Starts pool as a linked process. The same options as for

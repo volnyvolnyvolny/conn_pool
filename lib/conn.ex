@@ -1,27 +1,89 @@
+defmodule Conn.Defaults do
+  @moduledoc """
+  Default implementations of optional callbacks to be used with `Conn` protocol:
+  `resource/1`, `methods!/1`, `call/3`.
+
+  Use it as:
+
+      defimpl Conn, for: MyConn do
+        use Conn.Defaults
+
+        # Callbacks:
+        def init(_, _), do: …
+        def resource(_), do: …
+        def methods!(_), do: …
+        def call(_, _, _), do: …
+
+        # Optional callbacks:
+        def parse(_,_), do: …
+        def spec(_), do: …
+      end
+
+  Also, `spec` fields could be provided as follows:
+
+      defimpl Conn, for: MyConn do
+        use Conn.Defaults, ttl: 10000, min_timeout: 10
+
+        def resource(_), do: …
+        def methods!(_), do: …
+        def call(_, _, _), do: …
+      end
+  """
+  defmacro __using__(opts) do
+    quote location: :keep, bind_quoted: [opts: opts] do
+      # def undo(_conn, _method, _specs) do
+      #   {:error, :notimplemented}
+      # end
+
+      def init(conn, _args), do: {:ok, conn}
+
+      def parse(_conn, _data), do: {:error, :notimplemented}
+
+      def spec(_conn) do
+        Enum.into(unquote(Macro.escape(opts)), %{
+          ttl: :infinity,
+          revive: true,
+          min_timeout: 0,
+          unsafe: false
+        })
+      end
+
+      defoverridable spec: 1,
+                     init: 2,
+                     # undo: 3,
+                     parse: 2
+    end
+  end
+end
+
 defprotocol Conn do
   @moduledoc """
   High level abstraction that represents connection in the most common sense.
   Implementation can use any transport to connect to any remote or VM-local
-  resource: `Agent`, `GenServer`, different http-APIs, etc.
+  resource: `Agent`, `GenServer`, different APIs, files, sockets, etc.
+
+  Also, take a look at `Conn.Defaults`.
 
   ## Callbacks
 
     * `init/2` — initialize connection with given arguments;
-    * `resource/1` — resource for that interaction is made;
+    * `resource/1` — resource associated with connection or it's representation;
     * `methods!/1` — methods supported while making `Conn.call/3`;
     * `call/3` — interact via selected method;
-    * `parse/2` — parse data in respect of connection context.
+    * `parse/2` — parse data in respect of connection context;
+    * `spec/1` — default options used while making `Conn.Pool.put!/3` call.
 
-  ## Example
+  ## TL;DR example
 
   Let's implement simple generic text-base RPC protocol. Client can send server
   requests in the form of `:COMMAND` or `:COMMAND:ARGS` to execute `COMMAND`
   with given `ARGS` or without them. There is a special request `:COMMANDS` to
-  ask for a list of all available commands, response for it is `ok:COMMAND1,CMD2,…`.
+  ask for a list of available commands, the response to which is
+  `ok:COMMAND1,CMD2,…`.
 
-  Server may reply with `ok:COMMAND1,CMD2,…`, `ok`, `ok:DATA` or `err:REASON`,
-  where `REASON` could be `notsupported` (command), `badarg`, `parse`, or
-  arbitrary string.
+  Server always replies with `ok:COMMAND1,CMD2,…`, `ok`, `ok:DATA` or
+  `err:REASON`, where `REASON` is `notsupported` (command), `badarg`, `parse`,
+  or any arbitrary string.
 
   Now simple test conn will look like:
 
@@ -30,11 +92,15 @@ defprotocol Conn do
   Let's implement protocol described above:
 
       defimpl Conn, for: TextConn do
+        use Conn.Defaults
+
         def init(conn, server) do
           if Process.alive?(server) do
             {:ok, %TextConn{res: server}}
           else
             {:error, :dead, :closed, conn}
+            # — it says that there is no way to init
+            # conn using the same args.
           end
         end
 
@@ -45,11 +111,11 @@ defprotocol Conn do
 
           receive do
             "ok:" <> cmds ->
-              String.split(",")
+              String.split(cmds, ",")
           end
         end
 
-        def call(%_{res: server} = conn, cmd, args \\\\ nil) when is_binary(args) do
+        def call(%_{res: server} = conn, cmd, args) when is_binary(args) do
           if Process.alive?(server) do
             send(server, {self(), args && ":\#{cmd}:\#{args}" || ":\#{cmd}"})
 
@@ -63,7 +129,7 @@ defprotocol Conn do
               "err:notsupported" ->
                 {:error, :notsupported, conn}
 
-              "err:"<>reason ->
+              "err:" <> reason ->
                 # Suggest 50 ms timeout.
                 {:error, reason, 50, conn}
             after
@@ -139,7 +205,9 @@ defprotocol Conn do
       ...>
       iex> res = spawn_link(&Server.loop/0)
       iex> {:ok, pool} = Conn.Pool.start_link()
-      iex> Conn.Pool.init(pool, %TextConn{}, res)
+      iex> {:ok, conn} = Conn.init(%TextConn{}, res)
+      iex> Conn.Pool.put!(pool, conn)
+      :ok
       iex> Conn.Pool.call(pool, res, "GET")
       {:ok, "0"}
       iex> Conn.Pool.call(pool, res, "INC")
@@ -153,38 +221,42 @@ defprotocol Conn do
       iex> Conn.Pool.call(pool, res, "GET")
       {:error, :resource}
 
-  `TextConn` could be used to connect to any server that implements above
+  `TextConn` could be used to connect to any server that implements the above
   protocol.
   """
 
   @type t :: term
-  @type id :: non_neg_integer
-
   @type method :: any
-  @type auth :: any
   @type resource :: any
   @type reply :: any
   @type reason :: any
   @type init_args :: any
 
   @doc """
-  Initialize connection, args could be provided.
+  Initializes `conn` with `args`.
+
+  Raise inside the `init/2` call will not cause any troubles.
+
+  Use `Conn.Defaults` to add implementation that just returns `{:ok, conn}`.
 
   ## In case of succeed, returns
 
-    * `{:ok, conn}`, where `conn` could be used immediately;
-    * `{:ok, timeout, conn}`, where suggested to wait `timeout` ms before use
+    * `{:ok, conn}`;
+    * `{:ok, timeout, conn}`, if suggested to wait `timeout` ms before use
       `conn`.
 
   ## If initialization fails, returns
 
-    * `{:error, :timeout, conn}` when call took too long, and it is suggested to
-      repeat it immediately;
-    * `{:error, reason, conn}` when suggested to repeat call immediately;
-    * `{:error, reason, timeout, conn}` when suggested to repeat `init/2` call
+    * `{:error, reason, conn}`;
+    * `{:error, reason, timeout, conn}`, if suggested to repeat `init/2` call
       after `timeout` ms.
+    * `{:error, reason, :closed, conn}`, if `conn` could never be reopened
+      (`init/2`) with the same `args`.
 
-  Raise inside the `init/2` call will not cause problems.
+  where `reason` could be:
+
+    * :timeout, if init process took too long;
+    * arbitrary term.
 
   ## Examples
 
@@ -195,40 +267,76 @@ defprotocol Conn do
   """
   @spec init(Conn.t(), init_args | []) ::
           {:ok, Conn.t()}
-          | {:ok, timeout, Conn.t()}
+          | {:ok, non_neg_integer(), Conn.t()}
           | {:error, :timeout | reason, Conn.t()}
-          | {:error, :timeout | reason, timeout, Conn.t()}
+          | {:error, :timeout | reason, non_neg_integer(), Conn.t()}
+          | {:error, :timeout | reason, :closed, Conn.t()}
   def init(_conn, args \\ [])
 
   @doc """
-  Interacts using given connection, method and data.
+  Returns default options used with `Conn.Pool.put!/3`.
+
+  Use `Conn.Defaults` to add default implementation of this method.
+
+  ## Examples
+
+      iex> defmodule C do
+      ...>   defstruct []
+      ...>
+      ...>   defimpl Conn do
+      ...>     use Conn.Defaults
+      ...>
+      ...>     def resource(_), do: :foo
+      ...>     def methods!(_), do: []
+      ...>     def call(_, _, _), do: :foo
+      ...>   end
+      ...> end
+      iex> Conn.spec(%C{})
+      %{ttl: :infinity, revive: true, min_timeout: 0, unsafe: false}
+  """
+  @spec spec(Conn.t()) :: %{
+          optional(:ttl) => timeout,
+          optional(:revive) => boolean | :force,
+          optional(:min_timeout) => non_neg_integer,
+          optional(:unsafe) => boolean
+        }
+  def spec(_conn)
+
+  @doc """
+  Interacts using given `conn`, `method` and `payload`.
 
   ## If call succeed, returns
 
     * `{:noreply, conn}` — call could be repeated immediately;
+
     * `{:noreply, timeout, conn}` — call could be repeated after `timeout` ms;
-    * `{:noreply, :infinity | :closed, conn}` — call should not be repeated as
-      it will return `{:error, :closed}` until reopen happend (via `init/2`);
+    * `{:noreply, :closed, conn}` — call should not be repeated as it will
+      return `{:error, :closed}` until reopen happend (via `init/2`);
 
     * `{:reply, reply, conn}`, where `reply` is the response data and call could
       be repeated immediately;
     * `{:reply, reply, timeout, conn}` when suggested to repeat call no sooner
       than `timeout` ms;
-    * `{:reply, reply, :infinity | :closed, conn}` when `init/2` should be
-      called prior to any other interactions.
+    * `{:reply, reply, :closed, conn}` when `init/2` should be called prior to
+      any other forthcomming interactions.
 
-  ## If call fails, returns
+  ## If call fails
 
-    * `{:error, :closed}` — because connection is closed (use `init/2` to
-      reopen);
-    * `{:error, :timeout, conn}` — because call takes too long;
-    * `{:error, :notsupported, conn}` — because method is not supported;
-    * `{:error, reason, conn}` where `reason` is an arbitrary term and call
-      could be repeated immediately;
-    * `{:error, reason, timeout, conn}` suggested to repeat call no sooner than
-      `timeout` ms;
-    * `{:error, reason, :infinity | :closed, conn}` when call should be repeated
-      only after connection is reopened with `init/2`.
+  Error tuple should always take one of the following forms:
+
+    * `{:error, :closed}` — call failed because connection is closed (use
+      `init/2` to reopen);
+    * `{:error, reason, conn}`;
+    * `{:error, reason, timeout, conn}`;
+    * `{:error, reason, :closed, conn}` — if `conn` became closed (use `init/2`
+      to reopen).
+
+  where:
+
+    * `reason` could be `:notsupported` if `method` is not supported, `:timeout`
+      if call took too long, or arbitrary term except `:closed`;
+    * `timeout` is a suggested value in ms to wait until try any call on any
+      method again.
 
   ## Examples
 
@@ -238,7 +346,7 @@ defprotocol Conn do
       iex> Conn.call(conn, :get, & &1)
       {:error, :closed}
   """
-  @spec call(Conn.t(), Conn.method(), any) ::
+  @spec call(Conn.t(), Conn.method(), any | nil) ::
           {:noreply, Conn.t()}
           | {:noreply, timeout, Conn.t()}
           | {:reply, reply, Conn.t()}
@@ -280,8 +388,8 @@ defprotocol Conn do
   # def undo(conn, method, payload_used \\ [])
 
   @doc """
-  Resource is an arbitrary term (for ex., some pid). Connection represents
-  interaction with resource.
+  Returns resource associated with `conn`. Resource could represent any
+  arbitrary term, without limitations.
 
   ## Examples
 
@@ -295,17 +403,21 @@ defprotocol Conn do
       iex> {:ok, conn2} = Conn.init(%Conn.Agent{}, res: agent)
       iex> Conn.resource(conn1) == Conn.resource(conn2)
       true
+
+      iex> {:ok, conn} = Conn.init(%Conn.HTTP{}, url: "https://google.com")
+      iex> Conn.resource(conn)
+      "https://google.com"
   """
   @spec resource(Conn.t()) :: resource | [resource]
   def resource(conn)
 
   @doc """
-  Methods of interactions available for connection. Can be HTTP-methods: `:get`,
-  `:put`, `:post`, etc., or custom terms `:info`, `:say`, `:ask`, `{:method, 1}`
-  and so on. They represents types of interactions can be done using given
-  connection.
+  Returns methods of interactions available for `conn`. Can be HTTP methods:
+  `:get`, `:put`, `:post`, etc., or custom terms `:info`, `:say`, `:ask`,
+  `{:method, 1}` and so on. They represents types of interactions can be done
+  using given connection.
 
-  It's taken to be that for arbitrary conn method list could not always be
+  It's taken to be, that method list for an arbitrary conn could not always be
   preprogrammed or even stay permanent during it's lifecycle.
 
   ## Returns
@@ -313,7 +425,7 @@ defprotocol Conn do
     * list of methods available for `call/3`;
     * list of methods available for `call/3` and `updated conn`.
 
-  or raise.
+  or raise!
 
   ## Examples
 
@@ -330,7 +442,7 @@ defprotocol Conn do
   @type rest :: data
 
   @doc """
-  Parse data in context of given connection.
+  Parses data in context of given `conn`.
 
   ## Returns
 
@@ -341,12 +453,13 @@ defprotocol Conn do
 
   On error:
 
-    * `{:error, :notimplemented}` if parse is not implemented;
-    * `{:error, :needmoredata}` if parsing needs more data;
+    * `{:error, :notimplemented}`;
+    * `{:error, :needmoredata}`;
     * `{:error, {:parse, data that is malformed}, rest of the data}`;
-    * `{:error, reason}` for any other error while parsing.
+    * `{:error, reason}` — for any other parse error.
 
-  If `parse/2` function will not be used return `{:error, :notimplemented}`.
+  Use `Conn.Defaults` to add implementation that just returns `{:error,
+  :notimplemented}.
 
   See example in the head of the module docs.
   """

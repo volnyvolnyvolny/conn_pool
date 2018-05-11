@@ -1,6 +1,6 @@
 defmodule Conn.HTTP do
   @moduledoc """
-  This module represents HTTP-connection. It's a simple HTTPoison wrapper.
+  This module represents HTTP connection. It's a simple HTTPoison wrapper.
 
   To initialize, use `Conn.init/2` method:
 
@@ -58,7 +58,7 @@ end
 defimpl Conn, for: Conn.HTTP do
   @methods [:get, :post, :put, :head, :delete, :patch, :options]
 
-  def init(conn, init_args \\ []) do
+  def init(conn, init_args) do
     u = init_args[:url] || init_args[:res] || raise(":url or :res must be provided!")
     r = init_args[:res] || u
 
@@ -93,7 +93,7 @@ defimpl Conn, for: Conn.HTTP do
 
   def methods!(_conn), do: @methods
 
-  def call(conn, method, params \\ [])
+  def call(conn, method, nil), do: call(conn, method, [])
 
   def call(%_{url: u} = conn, method, params) when method in @methods do
     url =
