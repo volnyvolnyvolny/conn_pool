@@ -30,101 +30,10 @@ defmodule Conn.Defaults do
         def methods!(_), do: …
         def call(_, _, _), do: …
       end
-
-  ### Defaults for `Conn.init/1` and `Conn.call/2`.
-
-  `Conn` protocol provides default arguments for `Conn.init/2` and
-  `Conn.call/3`, so:
-
-      Conn.init(conn) == Conn.init(conn, [])
-
-  and
-
-      Conn.call(conn, method) == Conn.call(conn, method, nil)
-
-  Potentially this can lead to errors. For ex., `Conn.HTTP` implementation of
-  `Conn` protocol has the explicit clause:
-
-      def call(conn, method, nil), do: call(conn, method, [])
-
-  if it's missed, execution of
-
-      Conn.call(%Conn.HTTP{url: "https://google.com"}, :get)
-
-  would lead to an error as this call expects params payload.
-
-  `Conn.Defaults` tries to prevent this situation providing implementation:
-
-      Conn.call(conn, _method, nil = _payload) do
-        {:error, :nopayload, conn}
-      end
-
-  Now
-
-      iex> defmodule X do
-      ...>   defstruct []
-      ...>
-      ...>   defimpl Conn do
-      ...>     use Conn.Defaults
-      ...>
-      ...>     def resource(_), do: :X
-      ...>     def methods!(_), do: []
-      ...>
-      ...>     def call(conn, _method, _payload) do
-      ...>       {:noreply, conn}
-      ...>     end
-      ...>   end
-      ...> end
-      ...>
-      iex> Conn.call(%X{}, :method)
-      {:error, :nopayload, %X{}}
-
-  while
-
-      iex> defmodule X do
-      ...>   defstruct []
-      ...>
-      ...>   defimpl Conn do
-      ...>     use Conn.Defaults
-      ...>
-      ...>     def resource(_), do: :X
-      ...>     def methods!(_), do: []
-      ...>
-      ...>     def call(conn, _method, nil) do
-      ...>       {:reply, :"call/2", conn}
-      ...>     end
-      ...>     def call(conn, _method, _payload) do
-      ...>       {:reply, :"call/3", conn}
-      ...>     end
-      ...>   end
-      ...> end
-      ...>
-      iex> Conn.call(%X{}, :method)
-      {:reply, :"call/2", conn}
-      iex> Conn.call(%X{}, :method, :payload)
-      {:reply, :"call/3", conn}
-
-  This could be turned off via:
-
-      use Conn.Defaults, except: :call
   """
   defmacro __using__(opts) do
-    call? = !opts[:except]
-    opts = Keyword.drop(opts, [:except])
-
-    quote location: :keep,
-          bind_quoted: [
-            opts: opts,
-            call?: call?
-          ] do
-
+    quote location: :keep, bind_quoted: [opts: opts] do
       def parse(_conn, _data), do: {:error, :notimplemented}
-
-      if call? do
-        def call(conn, _method, nil = _payload) do
-          {:error, :nopayload, conn}
-        end
-      end
 
       def init(conn, _args), do: {:ok, conn}
 
@@ -205,7 +114,7 @@ defprotocol Conn do
 
         def call(%_{res: server} = conn, cmd, args) when is_binary(args) do
           if Process.alive?(server) do
-            send(server, {self(), args && ":\#{cmd}:\#{args}" || ":\#{cmd}"})
+            send(server, {self(), args == "" && ":\#{cmd}" || ":\#{cmd}:\#{args}"})
 
             receive do
               "ok" ->
@@ -296,17 +205,17 @@ defprotocol Conn do
       iex> {:ok, conn} = Conn.init(%TextConn{}, res)
       iex> Conn.Pool.put!(pool, conn)
       :ok
-      iex> Conn.Pool.call(pool, res, "GET")
+      iex> Conn.Pool.call(pool, res, "GET", "")
       {:ok, "0"}
-      iex> Conn.Pool.call(pool, res, "INC")
+      iex> Conn.Pool.call(pool, res, "INC", "")
       {:ok, "1"}
-      iex> Conn.Pool.call(pool, res, "DEC")
+      iex> Conn.Pool.call(pool, res, "DEC", "")
       {:error, :method}
       iex> Conn.Pool.call(pool, res, "INC", :badarg)
       {:error, "badarg"}
-      iex> Conn.Pool.call(pool, res, "STOP")
+      iex> Conn.Pool.call(pool, res, "STOP", "")
       :ok
-      iex> Conn.Pool.call(pool, res, "GET")
+      iex> Conn.Pool.call(pool, res, "GET", "")
       {:error, :resource}
 
   `TextConn` could be used to connect to any server that implements the above
@@ -331,19 +240,20 @@ defprotocol Conn do
 
     * `{:ok, conn}`;
     * `{:ok, timeout, conn}`, if suggested to wait `timeout` ms before use
-      `conn`.
+      `conn` again.
 
   ## If initialization fails, returns
 
     * `{:error, reason, conn}`;
     * `{:error, reason, timeout, conn}`, if suggested to repeat `init/2` call
-      after `timeout` ms.
+      after `timeout` ms;
     * `{:error, reason, :closed, conn}`, if `conn` could never be reopened
       (`init/2`) with the same `args`.
 
   where `reason` could be:
 
-    * :timeout, if init process took too long;
+    * `:timeout`, if init process took too long;
+    * `:toosoon`, if init must be repeated later;
     * arbitrary term.
 
   ## Examples
@@ -357,7 +267,7 @@ defprotocol Conn do
           {:ok, Conn.t()}
           | {:ok, non_neg_integer(), Conn.t()}
           | {:error, :timeout | reason, Conn.t()}
-          | {:error, :timeout | reason, non_neg_integer(), Conn.t()}
+          | {:error, :timeout | :toosoon | reason, non_neg_integer(), Conn.t()}
           | {:error, :timeout | reason, :closed, Conn.t()}
   def init(_conn, args \\ [])
 
@@ -368,19 +278,24 @@ defprotocol Conn do
 
   ## Examples
 
-      iex> defmodule C do
-      ...>   defstruct []
-      ...>
-      ...>   defimpl Conn do
-      ...>     use Conn.Defaults
-      ...>
-      ...>     def resource(_), do: :foo
-      ...>     def methods!(_), do: []
-      ...>     def call(_, _, _), do: :foo
-      ...>   end
-      ...> end
-      iex> Conn.spec(%C{})
-      %{ttl: :infinity, revive: true, min_timeout: 0, unsafe: false}
+      defmodule X do
+        defstruct []
+
+        defimpl Conn do
+          use Conn.Defaults
+
+          def resource(_), do: :foo
+          def methods!(_), do: []
+          def call(_, _, _), do: :foo
+        end
+      end
+
+      Conn.spec(%X{}) == %{
+        ttl: :infinity,
+        revive: true,
+        min_timeout: 0,
+        unsafe: false
+      }
   """
   @spec spec(Conn.t()) :: %{
           optional(:ttl) => timeout,
@@ -430,19 +345,19 @@ defprotocol Conn do
 
       iex> {:ok, conn} = Conn.init(%Conn.Agent{}, fn -> 42 end)
       iex> {:reply, 42, ^conn} = Conn.call(conn, :get, & &1)
-      iex> {:noreply, :closed, ^conn} = Conn.call(conn, :stop)
+      iex> {:noreply, :closed, ^conn} = Conn.call(conn, :stop, [])
       iex> Conn.call(conn, :get, & &1)
       {:error, :closed}
   """
-  @spec call(Conn.t(), Conn.method(), any | nil) ::
+  @spec call(Conn.t(), Conn.method(), any) ::
           {:noreply, Conn.t()}
           | {:noreply, timeout, Conn.t()}
           | {:reply, reply, Conn.t()}
           | {:reply, reply, timeout, Conn.t()}
           | {:error, :closed}
           | {:error, :timeout | :notsupported | reason, Conn.t()}
-          | {:error, :timeout | :notsupported | reason, timeout | :closed, Conn.t()}
-  def call(conn, method, payload \\ nil)
+          | {:error, :timeout | :notsupported | :toosoon | reason, timeout | :closed, Conn.t()}
+  def call(conn, method, payload)
 
   @doc """
   Returns resource associated with `conn`. Resource could represent any
@@ -516,7 +431,7 @@ defprotocol Conn do
     * `{:error, reason}` — for any other parse error.
 
   Use `Conn.Defaults` to add implementation that just returns `{:error,
-  :notimplemented}.
+  :notimplemented}`.
 
   See example in the head of the module docs.
   """
@@ -527,6 +442,5 @@ defprotocol Conn do
           | {:error, {:parse, data}, rest}
           | {:error, :needmoredata}
           | {:error, :notimplemented | reason}
-  #         | {:ok, {:undo, method, data}, rest}
   def parse(_conn, data)
 end

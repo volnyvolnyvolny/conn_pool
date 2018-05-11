@@ -16,14 +16,14 @@ defmodule Conn.HTTP do
       ...>                           url: "https://google.com")
       iex> {:reply, resp, conn} =
       ...>   Conn.call(conn, :get, body: "", headers: [])
-      iex> resp.body =~ "Google"
+      iex> resp.body =~ "google"
       true
       #
       # Also this conn could be added to pool:
       iex> {:ok, pool} = Conn.Pool.start_link()
-      iex> Conn.Pool.put!(pool, %Conn{conn: conn})
+      iex> Conn.Pool.put!(pool, conn)
       iex> {:ok, resp} = Conn.Pool.call(pool, :search, :get)
-      iex> resp.body =~ "Google"
+      iex> resp.body =~ "google"
       true
 
   Also, mirrors could be provided:
@@ -33,7 +33,7 @@ defmodule Conn.HTTP do
       ...>                           mirrors: ["https://gooooooooooooogel.com",
       ...>                                     "https://duckduckgo.com"])
       iex> {:reply, resp, ^conn} =
-      ...>   Conn.call(conn, :get)
+      ...>   Conn.call(conn, :get, [])
       iex> resp.body =~ "duck"
       true
 
@@ -98,28 +98,33 @@ defimpl Conn, for: Conn.HTTP do
   def call(%_{url: u} = conn, method, params) when method in @methods do
     url =
       if is_function(u) do
-        unless params[:args] do
+        args = params[:args]
+
+        unless args do
           raise ":args opt must be provided in order to use URLs in form of anonymous funs."
         end
 
-        unless is_list(params[:args]) do
+        unless is_list(args) do
           raise ":args opt must be a list."
         end
 
-        apply(u, params[:args])
+        apply(u, args)
       end || u
 
     case HTTPoison.request(method, url, params[:body] || "", params[:headers] || [], params) do
       {:ok, %HTTPoison.AsyncResponse{id: ref}} ->
         {:reply, ref, conn}
 
-      {:ok, %HTTPoison.Response{status_code: 200} = resp} ->
-        {:reply, resp, conn}
+      # {:ok, %HTTPoison.Response{status_code: 200} = resp} ->
+      #   {:reply, resp, conn}
 
       {:ok, resp} ->
+        {:reply, resp, conn}
+
+      {:error, %HTTPoison.Error{reason: r}} ->
         case conn.mirrors do
           [] ->
-            {:reply, resp, conn}
+            {:error, r, conn}
 
           [m | ms] ->
             case call(%{conn | mirrors: ms, res: m}, method, params) do
@@ -130,9 +135,6 @@ defimpl Conn, for: Conn.HTTP do
                 {:error, reason, %{conn | mirrors: [url | ms]}}
             end
         end
-
-      {:error, %HTTPoison.Error{reason: r}} ->
-        {:error, r, conn}
     end
   end
 

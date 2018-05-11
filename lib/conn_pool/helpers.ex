@@ -13,8 +13,8 @@ defmodule Conn.Info do
     last_call: pos_integer | :never,
     last_init: pos_integer | :never,
     timeout: timeout,
-    force_timeout: timeout,
-    revive: boolean | :force,
+    min_timeout: non_neg_integer,
+    revive: boolean,
     unsafe: boolean
   }
 
@@ -25,7 +25,7 @@ defmodule Conn.Info do
     :methods,
     init_args: [],
     ttl: :infinity,
-    force_timeout: false,
+    min_timeout: 0,
     only: :all,
     closed: false,
     revive: false,

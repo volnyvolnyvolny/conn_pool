@@ -27,7 +27,7 @@ defmodule TextConn do
 
     def call(%_{res: server} = conn, cmd, args) do
       if Process.alive?(server) do
-        send(server, {self(), (args && ":#{cmd}:#{args}") || ":#{cmd}"})
+        send(server, {self(), (args == "" && ":#{cmd}") || ":#{cmd}:#{args}"})
 
         receive do
           "ok" ->
