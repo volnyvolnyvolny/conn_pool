@@ -1,7 +1,9 @@
 defmodule Conn.Defaults do
   @moduledoc """
+
   Default implementations of optional callbacks to be used with `Conn` protocol:
-  `resource/1`, `methods!/1`, `call/3`.
+  `Conn.resource/1`, `Conn.methods!/1`, `Conn.call/3`. Also, default
+  implementation of `Conn.init/2` is given.
 
   Use it as:
 
@@ -28,16 +30,103 @@ defmodule Conn.Defaults do
         def methods!(_), do: …
         def call(_, _, _), do: …
       end
+
+  ### Defaults for `Conn.init/1` and `Conn.call/2`.
+
+  `Conn` protocol provides default arguments for `Conn.init/2` and
+  `Conn.call/3`, so:
+
+      Conn.init(conn) == Conn.init(conn, [])
+
+  and
+
+      Conn.call(conn, method) == Conn.call(conn, method, nil)
+
+  Potentially this can lead to errors. For ex., `Conn.HTTP` implementation of
+  `Conn` protocol has the explicit clause:
+
+      def call(conn, method, nil), do: call(conn, method, [])
+
+  if it's missed, execution of
+
+      Conn.call(%Conn.HTTP{url: "https://google.com"}, :get)
+
+  would lead to an error as this call expects params payload.
+
+  `Conn.Defaults` tries to prevent this situation providing implementation:
+
+      Conn.call(conn, _method, nil = _payload) do
+        {:error, :nopayload, conn}
+      end
+
+  Now
+
+      iex> defmodule X do
+      ...>   defstruct []
+      ...>
+      ...>   defimpl Conn do
+      ...>     use Conn.Defaults
+      ...>
+      ...>     def resource(_), do: :X
+      ...>     def methods!(_), do: []
+      ...>
+      ...>     def call(conn, _method, _payload) do
+      ...>       {:noreply, conn}
+      ...>     end
+      ...>   end
+      ...> end
+      ...>
+      iex> Conn.call(%X{}, :method)
+      {:error, :nopayload, %X{}}
+
+  while
+
+      iex> defmodule X do
+      ...>   defstruct []
+      ...>
+      ...>   defimpl Conn do
+      ...>     use Conn.Defaults
+      ...>
+      ...>     def resource(_), do: :X
+      ...>     def methods!(_), do: []
+      ...>
+      ...>     def call(conn, _method, nil) do
+      ...>       {:reply, :"call/2", conn}
+      ...>     end
+      ...>     def call(conn, _method, _payload) do
+      ...>       {:reply, :"call/3", conn}
+      ...>     end
+      ...>   end
+      ...> end
+      ...>
+      iex> Conn.call(%X{}, :method)
+      {:reply, :"call/2", conn}
+      iex> Conn.call(%X{}, :method, :payload)
+      {:reply, :"call/3", conn}
+
+  This could be turned off via:
+
+      use Conn.Defaults, except: :call
   """
   defmacro __using__(opts) do
-    quote location: :keep, bind_quoted: [opts: opts] do
-      # def undo(_conn, _method, _specs) do
-      #   {:error, :notimplemented}
-      # end
+    call? = !opts[:except]
+    opts = Keyword.drop(opts, [:except])
 
-      def init(conn, _args), do: {:ok, conn}
+    quote location: :keep,
+          bind_quoted: [
+            opts: opts,
+            call?: call?
+          ] do
 
       def parse(_conn, _data), do: {:error, :notimplemented}
+
+      if call? do
+        def call(conn, _method, nil = _payload) do
+          {:error, :nopayload, conn}
+        end
+      end
+
+      def init(conn, _args), do: {:ok, conn}
 
       def spec(_conn) do
         Enum.into(unquote(Macro.escape(opts)), %{
@@ -50,7 +139,6 @@ defmodule Conn.Defaults do
 
       defoverridable spec: 1,
                      init: 2,
-                     # undo: 3,
                      parse: 2
     end
   end
@@ -92,7 +180,7 @@ defprotocol Conn do
   Let's implement protocol described above:
 
       defimpl Conn, for: TextConn do
-        use Conn.Defaults
+        use Conn.Defaults, unsafe: true
 
         def init(conn, server) do
           if Process.alive?(server) do
@@ -355,37 +443,6 @@ defprotocol Conn do
           | {:error, :timeout | :notsupported | reason, Conn.t()}
           | {:error, :timeout | :notsupported | reason, timeout | :closed, Conn.t()}
   def call(conn, method, payload \\ nil)
-
-  # @doc """
-  # Undo changes that were made by `Conn.call/3`. This used in
-  # Sagas-transactions.
-
-  # If you don't use transactions over multiple connections, use default
-  # implementation provided by `Conn.Defaults` that returns `{:error,
-  # :unsupported}` tuple for every conn, method and payload given as an argument.
-
-  # ## Examples
-
-  # {:ok, conn} = Pool.take_one(resource, [:say, :listen])
-  # {:ok, conn} = Conn.call(conn, :say, what: "Hi!", name: "Louie")
-
-  #     resource = %JSON_API{url: "http://example.com/api/v1"}
-
-  #     {:ok, conn} = Pool.take_first(resource, [:say, :listen])
-  #     {:ok, conn} = Conn.call(conn, :say, what: "Hi!", name: "Louie")
-
-  #     :ok = Conn.undo(conn, :say, what: "Hi!", name: "Louie")
-
-  #     # or, maybe, simply:
-  #     # :ok = Conn.undo(conn, :say) #as payload doesn't matters here
-  #     {:ok, _id} = Pool.put(conn) #return connection to pool
-  # """
-  # @spec undo(Conn.t, method, keyword) :: :ok
-  #                                      | {:ok, Conn.t}
-
-  #                                      | {:error, reason, Conn.t}
-  #                                      | {:error, :unsupported}
-  # def undo(conn, method, payload_used \\ [])
 
   @doc """
   Returns resource associated with `conn`. Resource could represent any

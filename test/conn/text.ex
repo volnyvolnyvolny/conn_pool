@@ -2,7 +2,7 @@ defmodule TextConn do
   defstruct [:res]
 
   defimpl Conn, for: TextConn do
-    use Conn.Defaults
+    use Conn.Defaults, unsafe: true
 
     def init(conn, server) do
       if Process.alive?(server) do

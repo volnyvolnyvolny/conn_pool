@@ -56,6 +56,8 @@ defmodule Conn.HTTP do
 end
 
 defimpl Conn, for: Conn.HTTP do
+  use Conn.Defaults, unsafe: true
+
   @methods [:get, :post, :put, :head, :delete, :patch, :options]
 
   def init(conn, init_args) do
@@ -88,8 +90,6 @@ defimpl Conn, for: Conn.HTTP do
   end
 
   def resource(%_{res: r}), do: r
-
-  def parse(_conn, _data), do: {:error, :notimplemented}
 
   def methods!(_conn), do: @methods
 
